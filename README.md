@@ -134,11 +134,10 @@ Vibe-QA-Reviewer/
 
 ## 🗺 Roadmap
 
-- [ ] PayPal paywall — unlock code fixes for $9.99
-- [ ] Wix consulting CTA with booking link
 - [ ] OG image generator for shareable report previews
 - [ ] GitHub Gist integration — save/load code files directly
 - [ ] CI/CD webhook — trigger reviews on every push
+- [ ] Team/agency white-label (remove DarkPixel CTA, swap in yours)
 
 ---
 
