@@ -150,4 +150,12 @@ Vibe-QA-Reviewer/
 
 ## 📄 License
 
-MIT — free to use, fork, and build on.
+The source in this repository is **MIT** — free to use, fork, study, and modify.
+
+**Paid Gumroad tiers** add a commercial license grant on top of MIT:
+
+- **Personal** — use it yourself on any project. (MIT already covers this; the paid tier adds email support and update access.)
+- **Agency / White-label** — rebrand the report (remove or replace the DarkPixel CTA) and bundle the tool into client deliverables or paid services.
+- **Pro** — the above plus access to the review prompt as a separate editable file and priority email support.
+
+The paid grants *add* rights; they don't remove any MIT rights from the public source. If you're using the repo as-is, with the DarkPixel CTA intact, MIT alone covers you.
