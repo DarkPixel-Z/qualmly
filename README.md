@@ -147,6 +147,17 @@ Vibe-QA-Reviewer/
 
 ---
 
-## 📄 License
+## 💰 Pricing & License
 
-MIT — free to use, fork, and build on.
+The source in this repository is **MIT** — free to use, fork, study, and modify.
+
+**[Get it on Gumroad →](https://gumroad.com/)** <!-- replace with your actual Gumroad URL -->
+
+| Tier | Price | What you get |
+|---|---|---|
+| **Personal** | **$15** | Use it yourself on any project, any client work. Email support + update access. *(Launch-week price: **$9** for the first 100 buyers.)* |
+| **Agency / White-label** | **$49** | Everything in Personal, plus permission to rebrand the report (remove or replace the DarkPixel CTA) and bundle the tool into paid client deliverables. |
+
+The paid grants *add* rights on top of MIT; they don't remove any MIT rights from the public source. If you're using the repo as-is, with the DarkPixel CTA intact, MIT alone covers you.
+
+Need a deeper engagement — custom review prompts tuned to your stack, on-prem hosting, or a full QA/security audit done by humans? **[Book DarkPixel Consulting](https://www.darkpixelconsultinginc.co/)**.
