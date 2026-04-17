@@ -401,6 +401,13 @@
           </select>
         </div>
       </div>
+      <div style="margin-top:14px;display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--lime-dim);border-radius:var(--radius-sm);background:var(--lime-glow)">
+        <input type="checkbox" id="vibe-check" checked style="margin-top:2px;accent-color:var(--lime);width:16px;height:16px;flex-shrink:0">
+        <label for="vibe-check" style="font-size:12px;line-height:1.5;color:var(--text);cursor:pointer;margin:0">
+          <strong style="color:var(--lime)">&#128737; Vibe-Coded App preset</strong>
+          <span style="color:var(--muted)">&mdash; also scans for the common failure patterns in AI-generated code: missing Supabase RLS, secret keys leaked to the client, unauthenticated endpoints, exposed admin routes, and AI-boilerplate CORS/CSRF mistakes.</span>
+        </label>
+      </div>
       <div id="error-msg" class="error-box"></div>
       <button class="cta-btn" id="check-btn" onclick="runCheck()">&#9889; Run QA Check &mdash; it's free</button>
     </div>
@@ -521,6 +528,7 @@
       <input class="filter-search" id="filter-search" placeholder="Search issues..." oninput="filterIssues()">
     </div>
     <div id="cr-issues-grid" class="tests-grid"></div>
+    <div id="cr-cost-footer"></div>
 
     <a class="darkpixel-row slide-in-delay2" href="https://www.darkpixelconsultinginc.co/" target="_blank" rel="noopener">
       <div class="darkpixel-left">
@@ -623,6 +631,7 @@
 
     <div class="insight-box slide-in-delay2" id="insight-box"></div>
     <div class="tests-grid" id="tests-grid"></div>
+    <div id="cost-footer"></div>
 
     <!-- DarkPixel Consulting Inc. CTA replaces share button -->
     <a class="darkpixel-row slide-in-delay2" href="https://www.darkpixelconsultinginc.co/" target="_blank" rel="noopener">
@@ -823,6 +832,52 @@ function buildCodeFixHTML(codeFix) {
   "</div>";
 }
 
+// Builder-specific natural-language prompt the user can paste directly into
+// Lovable / Bolt / v0 / etc. Only rendered if the AI returned one (and only
+// requested when the selected builder is an AI-builder).
+const BUILDER_LABELS = { lovable:"Lovable", bolt:"Bolt.new", v0:"v0 by Vercel", replit:"Replit", webflow:"Webflow AI" };
+
+function buildBuilderPromptHTML(prompt, builder) {
+  if (!prompt) return "";
+  const label = BUILDER_LABELS[builder] || "your AI builder";
+  const escaped = escapeHtml(prompt);
+  const uid = "bp_" + Math.random().toString(36).slice(2,8);
+  return "<div class=\"code-fix-box\" style=\"margin-top:10px;border-color:var(--lime-dim)\">" +
+    "<div class=\"code-fix-header\" style=\"background:var(--lime-glow);color:var(--lime)\">" +
+      "<span>&#128640; Paste into " + escapeHtml(label) + "</span>" +
+      "<button class=\"code-copy-btn\" id=\"" + uid + "\" onclick=\"copyCode(document.getElementById('" + uid + "'),this.dataset.code)\" data-code=\"\">Copy</button>" +
+    "</div>" +
+    "<div class=\"code-fix-body\" style=\"white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.5\" id=\"" + uid + "\">" + escaped + "</div>" +
+  "</div>";
+}
+
+// ── Cost transparency ────────────────────────────────────────────────────────
+// Claude pricing per million tokens (input / output). Keep in sync with
+// https://www.anthropic.com/pricing. Fallback is Sonnet pricing.
+const CLAUDE_PRICING = {
+  "claude-sonnet-4-6": { inPerM: 3, outPerM: 15 },
+  "claude-sonnet-4-5": { inPerM: 3, outPerM: 15 },
+  "claude-opus-4-7":   { inPerM: 15, outPerM: 75 },
+  "claude-haiku-4":    { inPerM: 0.8, outPerM: 4 }
+};
+
+function renderCostFooter(containerId, usage, modelId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!usage) { el.innerHTML = ""; return; }
+  const price = CLAUDE_PRICING[modelId] || CLAUDE_PRICING["claude-sonnet-4-6"];
+  const inTok = usage.input_tokens || 0;
+  const outTok = usage.output_tokens || 0;
+  const cost = (inTok * price.inPerM + outTok * price.outPerM) / 1e6;
+  const costStr = cost < 0.01 ? "&lt; $0.01" : "~$" + cost.toFixed(2);
+  el.innerHTML =
+    "<div style=\"font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);text-align:center;margin:28px 0 16px;padding:14px;border-top:1px solid var(--border)\">" +
+      "&#128176; This review used " + costStr + " of your Anthropic credits &middot; " +
+      inTok.toLocaleString() + " input + " + outTok.toLocaleString() + " output tokens &middot; " +
+      escapeHtml(modelId) +
+    "</div>";
+}
+
 function renderReport(data, url, savedDateStr, isShared) {
   const dateStr = savedDateStr || new Date().toLocaleDateString("en-US", {month:"short",day:"numeric",year:"numeric"});
   document.getElementById("report-date").textContent = dateStr;
@@ -863,6 +918,7 @@ function renderReport(data, url, savedDateStr, isShared) {
     }).join("");
 
     const codeFixHtml = buildCodeFixHTML(cat.codeFix);
+    const builderPromptHtml = buildBuilderPromptHTML(cat.builderFixPrompt, data._builder);
 
     // Wire up code copy data attribute after insertion
     card.innerHTML =
@@ -876,16 +932,19 @@ function renderReport(data, url, savedDateStr, isShared) {
         "<ul class=\"issue-list\">" + issues + "</ul>" +
         (cat.recommendation ? "<div class=\"rec-box\"><strong>&rarr; Fix:</strong> " + escapeHtml(cat.recommendation) + "</div>" : "") +
         codeFixHtml +
+        builderPromptHtml +
       "</div>";
 
-    // Attach codeFix data to copy button so it has the real value
-    if (cat.codeFix) {
-      const btn = card.querySelector(".code-copy-btn");
-      if (btn) btn.dataset.code = cat.codeFix;
-    }
+    // Attach raw codeFix to the code-fix copy button AND raw builderFixPrompt to its copy button
+    const copyBtns = card.querySelectorAll(".code-copy-btn");
+    if (copyBtns[0] && cat.codeFix) copyBtns[0].dataset.code = cat.codeFix;
+    if (copyBtns[1] && cat.builderFixPrompt) copyBtns[1].dataset.code = cat.builderFixPrompt;
 
     grid.appendChild(card);
   });
+
+  // Cost footer
+  renderCostFooter("cost-footer", data._usage, "claude-sonnet-4-6");
 
   showScreen("report");
 
@@ -904,6 +963,7 @@ async function runCheck() {
   const desc = document.getElementById("desc").value.trim();
   const appType = document.getElementById("type").value;
   const builder = document.getElementById("builder").value;
+  const vibeCheck = document.getElementById("vibe-check") && document.getElementById("vibe-check").checked;
   const errEl = document.getElementById("error-msg");
 
   if (!url) { errEl.style.display="block"; errEl.textContent="⚠ Please enter your app URL first."; return; }
@@ -919,6 +979,28 @@ async function runCheck() {
   document.getElementById("terminal-log").innerHTML = "";
   TERMINAL_STEPS.forEach(s => addTerminalLog(s.text, "t-muted", s.delay));
 
+  const AI_BUILDERS = ["lovable","bolt","v0","replit","webflow"];
+  const wantsBuilderPrompt = AI_BUILDERS.includes(builder);
+  const builderLabelMap = { lovable:"Lovable", bolt:"Bolt.new", v0:"v0 by Vercel", replit:"Replit", webflow:"Webflow AI" };
+  const builderLabel = builderLabelMap[builder] || builder;
+
+  const vibeCheckBlock = vibeCheck ? `
+
+IMPORTANT — VIBE-CODED APP CHECK (enabled):
+Also scan specifically for the failure patterns that are common in AI-generated code from ${builder}. These have caused real production incidents (e.g. hundreds of Lovable apps exposing user data via missing Supabase Row-Level Security in 2025):
+- Supabase tables without Row-Level Security (RLS) enabled
+- Service-role / admin keys embedded in client-side JS (including \`service_role\` Supabase keys, Stripe \`sk_live_\`, OpenAI \`sk-\`, Anthropic \`sk-ant-\`, etc.)
+- Protected API endpoints that forget to check authentication
+- Admin or debug routes left exposed ( /admin, /debug, /api/internal, etc.)
+- CORS set to \`*\` with credentials allowed
+- Missing CSRF protection on state-changing routes
+- Stripe webhook handlers that don't verify signatures
+- Authorization checks that rely on client-side state only
+When you find these, surface them in the auth, data, or errors categories with severity "fail" (they are almost always critical). Prefix the issue text with "[AI-code]: ".` : "";
+
+  const builderPromptField = wantsBuilderPrompt ? `,
+      "builderFixPrompt": "<2-4 sentence natural-language prompt the user can paste DIRECTLY INTO ${builderLabel} to fix the top issue. Start with a verb. Example for Lovable: 'Enable Row-Level Security on the users table in Supabase. Add a policy that lets a user read only their own row: auth.uid() = id. Also add an insert policy gated on auth.uid().' Must be specific to this app and this issue, not generic."` : "";
+
   const prompt = `You are a senior QA engineer reviewing a vibe-coded web app (built with AI tools like ${builder}).
 
 App URL: ${url}
@@ -926,7 +1008,7 @@ App description: ${desc}
 App type: ${appType}
 Built with: ${builder}
 
-Based on the URL, app description, app type, and common failure patterns in AI-generated code from ${builder}, produce a detailed QA analysis.
+Based on the URL, app description, app type, and common failure patterns in AI-generated code from ${builder}, produce a detailed QA analysis.${vibeCheckBlock}
 
 Return ONLY valid JSON (no markdown, no extra text) matching this exact schema:
 {
@@ -941,7 +1023,7 @@ Return ONLY valid JSON (no markdown, no extra text) matching this exact schema:
         { "text": "<specific issue>", "severity": "<pass|warn|fail>" }
       ],
       "recommendation": "<1-2 sentence actionable fix>",
-      "codeFix": "<MAX 8 lines. Concise copy-paste snippet fixing the top issue. Start with: // Fix: [issue]. Real JS/HTML only.>>"
+      "codeFix": "<MAX 8 lines. Concise copy-paste snippet fixing the top issue. Start with: // Fix: [issue]. Real JS/HTML only.>"${builderPromptField}
     }
   ]
 }
@@ -991,6 +1073,8 @@ Requirements:
         throw new Error("Response was cut off — please try again. (JSON truncated)");
       }
     }
+    if (data.usage) reportData._usage = data.usage;
+    reportData._builder = builder;
     await new Promise(r => setTimeout(r, 8000));
     addTerminalLog("Analysis complete!", "t-pass", 0);
     await new Promise(r => setTimeout(r, 500));
@@ -1806,6 +1890,7 @@ async function runCodeReview() {
         throw new Error("Response was cut off — please try again.");
       }
     }
+    if (data.usage) reportData._usage = data.usage;
     await new Promise(r => setTimeout(r, 7000));
     addTerminalLog("Review complete!", "t-pass", 0);
     await new Promise(r => setTimeout(r, 500));
@@ -1960,6 +2045,9 @@ function renderCodeReport(data, meta, savedDateStr) {
       data, meta
     });
   }
+
+  // Cost footer
+  renderCostFooter("cr-cost-footer", data._usage, "claude-sonnet-4-6");
 
   showScreen("code-report");
 }
