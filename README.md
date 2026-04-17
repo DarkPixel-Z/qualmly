@@ -158,6 +158,33 @@ The source in this repository is **MIT** — free to use, fork, study, and modif
 | **Personal** | **$15** | Use it yourself on any project, any client work. Email support + update access. *(Launch-week price: **$9** for the first 100 buyers.)* |
 | **Agency / White-label** | **$49** | Everything in Personal, plus permission to rebrand the report (remove or replace the DarkPixel CTA) and bundle the tool into paid client deliverables. |
 
-The paid grants *add* rights on top of MIT; they don't remove any MIT rights from the public source. If you're using the repo as-is, with the DarkPixel CTA intact, MIT alone covers you.
+The paid grants *add* rights on top of MIT; they don't remove any MIT rights from the public source. If you're using the repo as-is, with the DarkPixel CTA intact, MIT alone covers you. Full commercial license: [docs/COMMERCIAL-LICENSE.md](docs/COMMERCIAL-LICENSE.md).
 
 Need a deeper engagement — custom review prompts tuned to your stack, on-prem hosting, or a full QA/security audit done by humans? **[Book DarkPixel Consulting](https://www.darkpixelconsultinginc.co/)**.
+
+---
+
+## ❓ FAQ
+
+**If the source is MIT-licensed, why pay?**
+The paid Gumroad tiers add commercial rights on top of MIT: email support, 12 months of update access, a written commercial license you can show clients or accountants, and — with the Agency tier — permission to white-label the report. If you just want the tool for yourself and don't need any of that, the MIT source is free. No purchase required.
+
+**Do I need my own API key?**
+Yes. VibeCheck calls Anthropic's Claude API directly from your browser using **your** key. Get one at [console.anthropic.com](https://console.anthropic.com). Typical review costs a few cents and the exact amount is shown on every report.
+
+**What data leaves my machine?**
+- Target URL → 3 third-party CORS proxies (allorigins, codetabs, corsproxy) and optionally Wayback Machine
+- Pasted code or URL summary → Anthropic's API
+- Your API key → Anthropic only, never anyone else
+- **Zero** data to DarkPixel servers (there are none)
+
+Full details: [docs/PRIVACY.md](docs/PRIVACY.md).
+
+**Can I rebrand the report for my agency's clients?**
+With the Agency / White-label tier, yes — remove or replace the DarkPixel CTA and bundle the tool into your audit deliverables. See [docs/COMMERCIAL-LICENSE.md](docs/COMMERCIAL-LICENSE.md).
+
+**Is this a real security audit?**
+No. It's AI-assisted triage — useful for catching common mistakes quickly, not a substitute for a human audit on anything customer-facing or regulated. See [docs/DISCLAIMER.md](docs/DISCLAIMER.md).
+
+**What about refunds?**
+See the refund policy on the Gumroad listing at the time of purchase.
