@@ -430,9 +430,12 @@
           <select id="builder">
             <option value="lovable">Lovable</option>
             <option value="bolt">Bolt.new</option>
-            <option value="replit">Replit</option>
-            <option value="cursor">Cursor + manual code</option>
             <option value="v0">v0 by Vercel</option>
+            <option value="cursor">Cursor</option>
+            <option value="copilot">GitHub Copilot</option>
+            <option value="claude-code">Claude Code</option>
+            <option value="windsurf">Windsurf</option>
+            <option value="replit">Replit</option>
             <option value="webflow">Webflow + AI</option>
             <option value="other">Other / Mixed</option>
           </select>
@@ -614,13 +617,17 @@
   <div class="modal-overlay" id="api-modal">
     <div class="modal-box">
       <div class="modal-title">&#128272; Enter API Key</div>
-      <div class="modal-sub">Your Anthropic API key is stored only in this browser tab &mdash; never sent anywhere except Anthropic's servers.</div>
+      <div class="modal-sub">Your Anthropic API key is sent only to Anthropic's servers &mdash; never to DarkPixel or any third party.</div>
       <div class="modal-error" id="api-modal-error">That doesn't look like a valid key. It should start with sk-ant-</div>
       <div class="modal-input-wrap">
         <input type="password" class="modal-input" id="api-key-input" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false">
         <button class="modal-eye" onclick="toggleApiKeyVis()" id="eye-btn">&#128065;</button>
       </div>
-      <div class="modal-hint">Get a free key at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a> &rarr; API Keys</div>
+      <label for="remember-key" style="display:flex;align-items:center;gap:8px;margin:12px 0 4px;font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);cursor:pointer">
+        <input type="checkbox" id="remember-key" style="accent-color:var(--lime);width:14px;height:14px;cursor:pointer">
+        Remember on this device (stores in localStorage across browser restarts)
+      </label>
+      <div class="modal-hint">Get a key at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a> &rarr; API Keys. Clear it any time from Preferences.</div>
       <button class="modal-btn" onclick="submitApiKey()">&#9889; Save &amp; Continue</button>
     </div>
   </div>
@@ -636,9 +643,12 @@
           <select id="pref-builder">
             <option value="lovable">Lovable</option>
             <option value="bolt">Bolt.new</option>
-            <option value="replit">Replit</option>
-            <option value="cursor">Cursor + manual code</option>
             <option value="v0">v0 by Vercel</option>
+            <option value="cursor">Cursor</option>
+            <option value="copilot">GitHub Copilot</option>
+            <option value="claude-code">Claude Code</option>
+            <option value="windsurf">Windsurf</option>
+            <option value="replit">Replit</option>
             <option value="webflow">Webflow + AI</option>
             <option value="other">Other / Mixed</option>
           </select>
@@ -680,12 +690,17 @@
           <textarea id="pref-focus" rows="3" placeholder="e.g. I care especially about PCI compliance and Stripe integration safety. This is a healthcare-adjacent app — prioritize HIPAA-adjacent concerns."></textarea>
         </div>
       </div>
+      <div style="margin-top:10px;padding-top:12px;border-top:1px dashed var(--border);font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span>&#128272; API key:</span>
+        <span id="pref-apikey-status">not saved</span>
+        <button onclick="clearApiKeyFromPrefs()" style="margin-left:auto;font-family:'DM Mono',monospace;font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid rgba(255,77,109,0.3);background:transparent;color:var(--fail);cursor:pointer">Clear saved key</button>
+      </div>
       <div class="prefs-footer">
         <button class="prefs-save" onclick="savePrefs()">Save</button>
         <button onclick="closePrefs()">Cancel</button>
         <button onclick="exportPrefs()" style="margin-left:auto">&#8681; Export JSON</button>
         <button onclick="document.getElementById('prefs-import-file').click()">&#8679; Import JSON</button>
-        <button onclick="resetPrefs()" style="color:var(--fail);border-color:rgba(255,77,109,0.3)">Reset</button>
+        <button onclick="resetPrefs()" style="color:var(--fail);border-color:rgba(255,77,109,0.3)">Reset prefs</button>
         <input type="file" id="prefs-import-file" accept="application/json" style="display:none" onchange="importPrefsFromFile(this)">
       </div>
     </div>
@@ -946,7 +961,25 @@ function buildCodeFixHTML(codeFix) {
 // Builder-specific natural-language prompt the user can paste directly into
 // Lovable / Bolt / v0 / etc. Only rendered if the AI returned one (and only
 // requested when the selected builder is an AI-builder).
-const BUILDER_LABELS = { lovable:"Lovable", bolt:"Bolt.new", v0:"v0 by Vercel", replit:"Replit", webflow:"Webflow AI" };
+const BUILDER_LABELS = {
+  lovable: "Lovable", bolt: "Bolt.new", v0: "v0 by Vercel", replit: "Replit", webflow: "Webflow AI",
+  cursor: "Cursor", copilot: "GitHub Copilot", "claude-code": "Claude Code", windsurf: "Windsurf"
+};
+// "Paste destinations" — what kind of surface the user is pasting INTO. The
+// per-finding builderFixPrompt gets phrased differently for a web AI chat
+// (Lovable/Bolt/v0/Replit/Webflow) vs an IDE-embedded AI (Cursor/Copilot/
+// Claude Code/Windsurf). Claude chooses the right tone per entry.
+const BUILDER_CONTEXT = {
+  lovable:       { surface: "the Lovable web chat", style: "conversational web prompt, references features like the Supabase connector when relevant" },
+  bolt:          { surface: "the Bolt.new chat panel", style: "conversational web prompt" },
+  v0:            { surface: "the v0 by Vercel chat", style: "conversational web prompt, React/Tailwind-focused when relevant" },
+  replit:        { surface: "the Replit Agent chat", style: "conversational web prompt" },
+  webflow:       { surface: "the Webflow AI assistant", style: "conversational web prompt, design/CMS-focused" },
+  cursor:        { surface: "Cursor's Cmd+K inline-edit or chat panel", style: "technical directive, reference the file/function by name" },
+  copilot:       { surface: "GitHub Copilot Chat in your IDE", style: "technical directive, include the fix as a code block if short" },
+  "claude-code": { surface: "the Claude Code CLI", style: "terminal-ready instruction, may reference file paths" },
+  windsurf:      { surface: "Windsurf's Cascade chat", style: "technical directive, file-aware" }
+};
 
 function buildBuilderPromptHTML(prompt, builder) {
   if (!prompt) return "";
@@ -1090,10 +1123,10 @@ async function runCheck() {
   document.getElementById("terminal-log").innerHTML = "";
   TERMINAL_STEPS.forEach(s => addTerminalLog(s.text, "t-muted", s.delay));
 
-  const AI_BUILDERS = ["lovable","bolt","v0","replit","webflow"];
+  const AI_BUILDERS = ["lovable","bolt","v0","replit","webflow","cursor","copilot","claude-code","windsurf"];
   const wantsBuilderPrompt = AI_BUILDERS.includes(builder);
-  const builderLabelMap = { lovable:"Lovable", bolt:"Bolt.new", v0:"v0 by Vercel", replit:"Replit", webflow:"Webflow AI" };
-  const builderLabel = builderLabelMap[builder] || builder;
+  const builderLabel = BUILDER_LABELS[builder] || builder;
+  const builderCtx = BUILDER_CONTEXT[builder] || { surface: "your AI coding tool", style: "natural-language prompt" };
 
   const vibeCheckBlock = vibeCheck ? `
 
@@ -1110,7 +1143,7 @@ Also scan specifically for the failure patterns that are common in AI-generated 
 When you find these, surface them in the auth, data, or errors categories with severity "fail" (they are almost always critical). Prefix the issue text with "[AI-code]: ".` : "";
 
   const builderPromptField = wantsBuilderPrompt ? `,
-      "builderFixPrompt": "<2-4 sentence natural-language prompt the user can paste DIRECTLY INTO ${builderLabel} to fix the top issue. Start with a verb. Example for Lovable: 'Enable Row-Level Security on the users table in Supabase. Add a policy that lets a user read only their own row: auth.uid() = id. Also add an insert policy gated on auth.uid().' Must be specific to this app and this issue, not generic."` : "";
+      "builderFixPrompt": "<2-4 sentence prompt the user pastes DIRECTLY INTO ${builderCtx.surface} to fix the top issue. Style: ${builderCtx.style}. Start with a verb. Must be specific to this app and this issue, not generic. Example (for Lovable web chat): 'Enable Row-Level Security on the users table in Supabase. Add a policy that lets a user read only their own row (auth.uid() = id). Also add an insert policy gated on auth.uid().' Example (for Cursor inline edit in src/api/login.js): 'Replace the raw string-concatenation SQL with a parameterised query. Use db.query(sql, [email]) and add input validation with zod.'"` : "";
 
   const prompt = `You are a senior QA engineer reviewing a vibe-coded web app (built with AI tools like ${builder}).
 
@@ -1164,7 +1197,7 @@ Requirements:
       })
     });
     if (!response.ok) {
-      if (response.status === 401) { sessionStorage.removeItem("vc_api_key"); throw new Error("Invalid API key — please reload and try again."); }
+      if (response.status === 401) { clearApiKey(); throw new Error("Invalid API key — please reload and try again."); }
       throw new Error("API error " + response.status);
     }
     const data = await response.json();
@@ -1603,8 +1636,16 @@ function buildPageDataFromHtml(rawHtml, url) {
 // ═════════════════════════════════════════════════════════════════════════════
 let _pendingAfterApiKey = null;
 
+// Key is stored in sessionStorage by default (wipes when tab closes) OR in
+// localStorage if the user ticks "Remember on this device". getApiKey reads
+// from whichever has it; clearApiKey and the 401 handler clear both.
 function getApiKey() {
-  return sessionStorage.getItem("vc_api_key");
+  return localStorage.getItem("vc_api_key") || sessionStorage.getItem("vc_api_key") || null;
+}
+
+function clearApiKey() {
+  try { localStorage.removeItem("vc_api_key"); } catch(e) {}
+  try { clearApiKey(); } catch(e) {}
 }
 
 function requireApiKeyFor(callback) {
@@ -1617,18 +1658,31 @@ function requireApiKeyFor(callback) {
   if (err) err.style.display = "none";
   const inp = document.getElementById("api-key-input");
   if (inp) { inp.value = ""; setTimeout(() => inp.focus(), 60); }
+  // Default the "Remember me" checkbox to ON if the buyer has previously
+  // opted in (signalled by a saved-key pref), OFF otherwise.
+  const rem = document.getElementById("remember-key");
+  if (rem) rem.checked = !!localStorage.getItem("vc_remember_key_pref");
   return null;
 }
 
 function submitApiKey() {
   const inp = document.getElementById("api-key-input");
   const err = document.getElementById("api-modal-error");
+  const remember = document.getElementById("remember-key");
   const val = ((inp && inp.value) || "").trim();
   if (!val.startsWith("sk-ant-")) {
     if (err) err.style.display = "block";
     return;
   }
-  sessionStorage.setItem("vc_api_key", val);
+  clearApiKey(); // wipe whichever was stored, then place fresh value
+  if (remember && remember.checked) {
+    try { localStorage.setItem("vc_api_key", val); localStorage.setItem("vc_remember_key_pref", "1"); } catch(e) {
+      sessionStorage.setItem("vc_api_key", val); // fallback if localStorage quota/private mode
+    }
+  } else {
+    sessionStorage.setItem("vc_api_key", val);
+    try { localStorage.removeItem("vc_remember_key_pref"); } catch(e) {}
+  }
   document.getElementById("api-modal").classList.remove("show");
   if (err) err.style.display = "none";
   const cb = _pendingAfterApiKey;
@@ -1777,7 +1831,26 @@ function openPrefs() {
   document.getElementById("pref-vibe-default").checked = !!p.vibeCheckDefault;
   document.getElementById("pref-skip-info").checked = !!p.skipInfo;
   document.getElementById("pref-focus").value = p.customFocus || "";
+  updateApiKeyStatus();
   document.getElementById("prefs-modal").classList.add("show");
+}
+
+function updateApiKeyStatus() {
+  const el = document.getElementById("pref-apikey-status");
+  if (!el) return;
+  const inLocal = !!localStorage.getItem("vc_api_key");
+  const inSession = !!sessionStorage.getItem("vc_api_key");
+  if (inLocal) el.textContent = "saved on this device (localStorage)";
+  else if (inSession) el.textContent = "saved for this tab only (sessionStorage)";
+  else el.textContent = "not saved";
+}
+
+function clearApiKeyFromPrefs() {
+  if (!confirm("Clear the saved Anthropic API key from this browser? You'll need to re-enter it next time.")) return;
+  clearApiKey();
+  try { localStorage.removeItem("vc_remember_key_pref"); } catch(e) {}
+  updateApiKeyStatus();
+  showToast("API key cleared.");
 }
 
 function closePrefs() {
@@ -2092,7 +2165,7 @@ async function runCodeReview() {
       })
     });
     if (!response.ok) {
-      if (response.status === 401) { sessionStorage.removeItem("vc_api_key"); throw new Error("Invalid API key — please reload and try again."); }
+      if (response.status === 401) { clearApiKey(); throw new Error("Invalid API key — please reload and try again."); }
       throw new Error("API error " + response.status);
     }
     const data = await response.json();
@@ -2432,7 +2505,7 @@ async function submitIntentional(idx) {
       })
     });
     if (!response.ok) {
-      if (response.status === 401) { sessionStorage.removeItem("vc_api_key"); throw new Error("Invalid API key"); }
+      if (response.status === 401) { clearApiKey(); throw new Error("Invalid API key"); }
       throw new Error("API error " + response.status);
     }
     const data = await response.json();
@@ -2551,7 +2624,7 @@ async function fetchPlainEnglish() {
       })
     });
     if (!response.ok) {
-      if (response.status === 401) { sessionStorage.removeItem("vc_api_key"); throw new Error("Invalid API key"); }
+      if (response.status === 401) { clearApiKey(); throw new Error("Invalid API key"); }
       throw new Error("API error " + response.status);
     }
     const data = await response.json();
