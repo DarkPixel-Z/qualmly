@@ -623,10 +623,28 @@
         <input type="password" class="modal-input" id="api-key-input" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false">
         <button class="modal-eye" onclick="toggleApiKeyVis()" id="eye-btn">&#128065;</button>
       </div>
-      <label for="remember-key" style="display:flex;align-items:center;gap:8px;margin:12px 0 4px;font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);cursor:pointer">
-        <input type="checkbox" id="remember-key" style="accent-color:var(--lime);width:14px;height:14px;cursor:pointer">
-        Remember on this device (stores in localStorage across browser restarts)
-      </label>
+      <div id="unlock-pass-row" style="display:none">
+        <input type="password" id="unlock-pass" placeholder="Passphrase" autocomplete="off" spellcheck="false" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:11px 14px;outline:none;font-weight:500">
+      </div>
+      <div style="margin:14px 0 4px">
+        <label for="remember-key" style="display:flex;align-items:center;gap:8px;font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="remember-key" onchange="_toggleEncryptRow()" style="accent-color:var(--lime);width:14px;height:14px;cursor:pointer">
+          Remember on this device
+        </label>
+        <label for="encrypt-key" id="encrypt-key-row" style="display:none;align-items:center;gap:8px;font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);cursor:pointer;margin-top:6px;padding-left:22px">
+          <input type="checkbox" id="encrypt-key" onchange="_toggleEncryptRow()" style="accent-color:var(--lime);width:14px;height:14px;cursor:pointer">
+          &#128274; Encrypt with a passphrase (AES-GCM)
+        </label>
+        <div id="encrypt-pass-row" style="display:none;margin-top:8px;padding-left:22px">
+          <input type="password" id="encrypt-pass" placeholder="Passphrase (min 8 chars) &mdash; you'll type this each session" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:12px;padding:8px 12px;outline:none;font-weight:500">
+        </div>
+        <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);margin-top:8px;line-height:1.5">
+          <strong style="color:var(--warn)">&#9888;</strong>
+          <strong>Tab only</strong> (unchecked): key wipes when this tab closes. Safest default.<br>
+          <strong>Remember</strong>: saved as plaintext in this browser's localStorage &mdash; anyone with access to this browser profile can read it. Don't tick on shared machines.<br>
+          <strong>Encrypt</strong>: passphrase-derived AES-GCM (Web Crypto). Storage is safe against disk snooping; you'll type the passphrase once per session.
+        </div>
+      </div>
       <div class="modal-hint">Get a key at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a> &rarr; API Keys. Clear it any time from Preferences.</div>
       <button class="modal-btn" onclick="submitApiKey()">&#9889; Save &amp; Continue</button>
     </div>
@@ -684,6 +702,17 @@
         <div class="prefs-row check-row">
           <input type="checkbox" id="pref-skip-info" style="accent-color:var(--lime);width:16px;height:16px">
           <label for="pref-skip-info">Auto-hide info-level findings on render</label>
+        </div>
+        <div class="prefs-row">
+          <label for="pref-idle-timeout">Auto-clear API key after idle</label>
+          <select id="pref-idle-timeout">
+            <option value="0">Never</option>
+            <option value="30">After 30 minutes</option>
+            <option value="120">After 2 hours</option>
+            <option value="240">After 4 hours</option>
+            <option value="480">After 8 hours</option>
+            <option value="1440">After 24 hours</option>
+          </select>
         </div>
         <div class="prefs-row">
           <label for="pref-focus">Custom focus (appended to every review prompt)</label>
@@ -1634,60 +1663,285 @@ function buildPageDataFromHtml(rawHtml, url) {
 // ═════════════════════════════════════════════════════════════════════════════
 // API KEY FLOW
 // ═════════════════════════════════════════════════════════════════════════════
+// Three storage modes:
+//   1. sessionStorage ("session")  — default; wipes on tab close
+//   2. localStorage plaintext ("local") — Remember me; survives restart
+//   3. localStorage AES-GCM encrypted ("encrypted") — Remember me + Encrypt
+//      with passphrase. Decrypted key cached in memory for the session.
+//
+// Idle timeout: configurable in Preferences. When the wall-clock gap between
+// API calls exceeds the timeout, the in-memory key is cleared, and for the
+// plaintext-local mode the stored key is also cleared so walking away from
+// an unlocked browser doesn't leave a permanent trail.
+// ═════════════════════════════════════════════════════════════════════════════
 let _pendingAfterApiKey = null;
+let _memKey = null; // in-memory decrypted key (for encrypted mode) OR mirror of storage for idle tracking
+let _lastKeyUse = 0; // timestamp of last successful API call
 
-// Key is stored in sessionStorage by default (wipes when tab closes) OR in
-// localStorage if the user ticks "Remember on this device". getApiKey reads
-// from whichever has it; clearApiKey and the 401 handler clear both.
+function _touchKeyUse() { _lastKeyUse = Date.now(); }
+
+function _idleTimeoutMs() {
+  const mins = (_currentPrefs && typeof _currentPrefs.idleTimeoutMin === "number") ? _currentPrefs.idleTimeoutMin : 0;
+  return mins > 0 ? mins * 60 * 1000 : 0;
+}
+
+function _checkIdleTimeout() {
+  const ms = _idleTimeoutMs();
+  if (!ms || !_lastKeyUse) return;
+  if (Date.now() - _lastKeyUse > ms) {
+    // Wipe in-memory decrypted key + any plaintext stored key. Leave the
+    // encrypted blob in localStorage intact — user will unlock next request.
+    _memKey = null;
+    try { localStorage.removeItem("vc_api_key"); } catch(e) {}
+    try { sessionStorage.removeItem("vc_api_key"); } catch(e) {}
+    showToast("API key auto-cleared (idle timeout).");
+  }
+}
+
 function getApiKey() {
-  return localStorage.getItem("vc_api_key") || sessionStorage.getItem("vc_api_key") || null;
+  _checkIdleTimeout();
+  if (_memKey) return _memKey;
+  const local = localStorage.getItem("vc_api_key");
+  const session = sessionStorage.getItem("vc_api_key");
+  return local || session || null;
+}
+
+function hasEncryptedKey() {
+  return !!localStorage.getItem("vc_api_key_encrypted");
 }
 
 function clearApiKey() {
+  _memKey = null;
   try { localStorage.removeItem("vc_api_key"); } catch(e) {}
-  try { clearApiKey(); } catch(e) {}
+  try { localStorage.removeItem("vc_api_key_encrypted"); } catch(e) {}
+  try { sessionStorage.removeItem("vc_api_key"); } catch(e) {}
+}
+
+// ── Web Crypto helpers (passphrase-derived AES-GCM) ─────────────────────────
+async function _deriveKey(passphrase, salt) {
+  const pwKey = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 300000, hash: "SHA-256" },
+    pwKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function _encryptApiKey(plaintext, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const aesKey = await _deriveKey(passphrase, salt);
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    aesKey,
+    new TextEncoder().encode(plaintext)
+  );
+  return {
+    v: 1,
+    salt: Array.from(salt),
+    iv: Array.from(iv),
+    ct: Array.from(new Uint8Array(ct))
+  };
+}
+
+async function _decryptApiKey(blob, passphrase) {
+  const salt = new Uint8Array(blob.salt);
+  const iv = new Uint8Array(blob.iv);
+  const ct = new Uint8Array(blob.ct);
+  const aesKey = await _deriveKey(passphrase, salt);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, aesKey, ct);
+  return new TextDecoder().decode(pt);
+}
+
+// ── Modal states ────────────────────────────────────────────────────────────
+// "entry"  — fresh: user pastes a new key, picks Remember / Encrypt
+// "unlock" — encrypted blob exists, user types the passphrase to decrypt
+function _setModalMode(mode) {
+  const titleEl = document.querySelector("#api-modal .modal-title");
+  const subEl   = document.querySelector("#api-modal .modal-sub");
+  const keyWrap = document.querySelector("#api-modal .modal-input-wrap");
+  const remRow  = document.getElementById("remember-key").parentElement.parentElement; // the group container
+  const hintEl  = document.querySelector("#api-modal .modal-hint");
+  const btnEl   = document.querySelector("#api-modal .modal-btn");
+  const unlockWrap = document.getElementById("unlock-pass-row");
+  const encRow  = document.getElementById("encrypt-key-row");
+  const encPassRow = document.getElementById("encrypt-pass-row");
+
+  if (mode === "unlock") {
+    titleEl.innerHTML = "&#128274; Unlock Saved Key";
+    subEl.textContent = "Your API key is encrypted in this browser. Enter the passphrase to unlock it for this session.";
+    keyWrap.style.display = "none";
+    remRow.style.display = "none";
+    if (encRow) encRow.style.display = "none";
+    if (encPassRow) encPassRow.style.display = "none";
+    if (unlockWrap) unlockWrap.style.display = "block";
+    btnEl.textContent = "🔓 Unlock";
+    btnEl.onclick = unlockApiKey;
+    hintEl.innerHTML = "Wrong passphrase? <a href=\"#\" onclick=\"event.preventDefault(); _discardEncryptedAndReset()\">Clear saved key and start over</a>.";
+    setTimeout(() => { const p = document.getElementById("unlock-pass"); if (p) p.focus(); }, 60);
+  } else {
+    titleEl.innerHTML = "&#128272; Enter API Key";
+    subEl.textContent = "Your Anthropic API key is sent only to Anthropic's servers — never to DarkPixel or any third party.";
+    keyWrap.style.display = "";
+    remRow.style.display = "";
+    if (unlockWrap) unlockWrap.style.display = "none";
+    btnEl.textContent = "⚡ Save & Continue";
+    btnEl.onclick = submitApiKey;
+    hintEl.innerHTML = 'Get a key at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a> → API Keys. Clear it any time from Preferences.';
+    setTimeout(() => { const i = document.getElementById("api-key-input"); if (i) i.focus(); }, 60);
+  }
+}
+
+function _discardEncryptedAndReset() {
+  try { localStorage.removeItem("vc_api_key_encrypted"); } catch(e) {}
+  _memKey = null;
+  _setModalMode("entry");
+  const err = document.getElementById("api-modal-error");
+  if (err) err.style.display = "none";
+  const ui = document.getElementById("unlock-pass"); if (ui) ui.value = "";
 }
 
 function requireApiKeyFor(callback) {
-  const k = getApiKey();
-  if (k) return k;
+  _checkIdleTimeout();
+  const k = _memKey || localStorage.getItem("vc_api_key") || sessionStorage.getItem("vc_api_key");
+  if (k) {
+    if (!_memKey) _memKey = k;
+    _touchKeyUse();
+    return k;
+  }
   _pendingAfterApiKey = (typeof callback === "function") ? callback : null;
   const modal = document.getElementById("api-modal");
   if (modal) modal.classList.add("show");
   const err = document.getElementById("api-modal-error");
   if (err) err.style.display = "none";
-  const inp = document.getElementById("api-key-input");
-  if (inp) { inp.value = ""; setTimeout(() => inp.focus(), 60); }
-  // Default the "Remember me" checkbox to ON if the buyer has previously
-  // opted in (signalled by a saved-key pref), OFF otherwise.
-  const rem = document.getElementById("remember-key");
-  if (rem) rem.checked = !!localStorage.getItem("vc_remember_key_pref");
+
+  if (hasEncryptedKey()) {
+    _setModalMode("unlock");
+  } else {
+    _setModalMode("entry");
+    const inp = document.getElementById("api-key-input");
+    if (inp) inp.value = "";
+    // Restore remember/encrypt pref state
+    const rem = document.getElementById("remember-key");
+    const enc = document.getElementById("encrypt-key");
+    if (rem) rem.checked = !!localStorage.getItem("vc_remember_key_pref");
+    if (enc) enc.checked = false;
+    _toggleEncryptRow();
+  }
   return null;
 }
 
-function submitApiKey() {
+function _toggleEncryptRow() {
+  const rem = document.getElementById("remember-key");
+  const encRow = document.getElementById("encrypt-key-row");
+  const encPassRow = document.getElementById("encrypt-pass-row");
+  const enc = document.getElementById("encrypt-key");
+  if (!rem || !encRow) return;
+  if (rem.checked) {
+    encRow.style.display = "flex";
+  } else {
+    encRow.style.display = "none";
+    if (enc) enc.checked = false;
+  }
+  if (encPassRow) encPassRow.style.display = (enc && enc.checked) ? "block" : "none";
+}
+
+async function submitApiKey() {
   const inp = document.getElementById("api-key-input");
   const err = document.getElementById("api-modal-error");
   const remember = document.getElementById("remember-key");
+  const encrypt = document.getElementById("encrypt-key");
+  const encPass = document.getElementById("encrypt-pass");
   const val = ((inp && inp.value) || "").trim();
+
   if (!val.startsWith("sk-ant-")) {
-    if (err) err.style.display = "block";
+    err.textContent = "That doesn't look like a valid key. It should start with sk-ant-";
+    err.style.display = "block";
     return;
   }
-  clearApiKey(); // wipe whichever was stored, then place fresh value
-  if (remember && remember.checked) {
-    try { localStorage.setItem("vc_api_key", val); localStorage.setItem("vc_remember_key_pref", "1"); } catch(e) {
-      sessionStorage.setItem("vc_api_key", val); // fallback if localStorage quota/private mode
+
+  const wantsEncrypt = remember && remember.checked && encrypt && encrypt.checked;
+  if (wantsEncrypt) {
+    const pass = ((encPass && encPass.value) || "");
+    if (pass.length < 8) {
+      err.textContent = "Passphrase must be at least 8 characters.";
+      err.style.display = "block";
+      return;
     }
-  } else {
-    sessionStorage.setItem("vc_api_key", val);
-    try { localStorage.removeItem("vc_remember_key_pref"); } catch(e) {}
   }
+
+  clearApiKey();
+
+  try {
+    if (wantsEncrypt) {
+      const blob = await _encryptApiKey(val, encPass.value);
+      localStorage.setItem("vc_api_key_encrypted", JSON.stringify(blob));
+      localStorage.setItem("vc_remember_key_pref", "1");
+      _memKey = val; // unlocked this session
+    } else if (remember && remember.checked) {
+      try {
+        localStorage.setItem("vc_api_key", val);
+        localStorage.setItem("vc_remember_key_pref", "1");
+      } catch(e) {
+        sessionStorage.setItem("vc_api_key", val); // quota / private-mode fallback
+      }
+      _memKey = val;
+    } else {
+      sessionStorage.setItem("vc_api_key", val);
+      try { localStorage.removeItem("vc_remember_key_pref"); } catch(e) {}
+      _memKey = val;
+    }
+  } catch(e) {
+    err.textContent = "Couldn't save: " + (e.message || "unknown error");
+    err.style.display = "block";
+    return;
+  }
+
+  _touchKeyUse();
   document.getElementById("api-modal").classList.remove("show");
   if (err) err.style.display = "none";
+  if (encPass) encPass.value = "";
   const cb = _pendingAfterApiKey;
   _pendingAfterApiKey = null;
   if (typeof cb === "function") cb();
+}
+
+async function unlockApiKey() {
+  const passEl = document.getElementById("unlock-pass");
+  const err = document.getElementById("api-modal-error");
+  const pass = ((passEl && passEl.value) || "");
+  if (!pass) {
+    err.textContent = "Passphrase required.";
+    err.style.display = "block";
+    return;
+  }
+  let blob;
+  try { blob = JSON.parse(localStorage.getItem("vc_api_key_encrypted") || "null"); } catch(e) { blob = null; }
+  if (!blob) {
+    // Encrypted key went missing between modal open and unlock — reset to entry.
+    _setModalMode("entry");
+    return;
+  }
+  try {
+    const plain = await _decryptApiKey(blob, pass);
+    _memKey = plain;
+    _touchKeyUse();
+    passEl.value = "";
+    err.style.display = "none";
+    document.getElementById("api-modal").classList.remove("show");
+    const cb = _pendingAfterApiKey;
+    _pendingAfterApiKey = null;
+    if (typeof cb === "function") cb();
+  } catch(e) {
+    err.textContent = "Wrong passphrase — couldn't decrypt.";
+    err.style.display = "block";
+    passEl.focus();
+    passEl.select();
+  }
 }
 
 function toggleApiKeyVis() {
@@ -1792,7 +2046,8 @@ const PREFS_DEFAULTS = {
   lang: "javascript",
   vibeCheckDefault: true,
   skipInfo: false,
-  customFocus: ""
+  customFocus: "",
+  idleTimeoutMin: 0 // 0 = never; other values: 30, 120, 240, 480, 1440 (minutes)
 };
 
 function loadPrefs() {
@@ -1831,6 +2086,8 @@ function openPrefs() {
   document.getElementById("pref-vibe-default").checked = !!p.vibeCheckDefault;
   document.getElementById("pref-skip-info").checked = !!p.skipInfo;
   document.getElementById("pref-focus").value = p.customFocus || "";
+  const idleSel = document.getElementById("pref-idle-timeout");
+  if (idleSel) idleSel.value = String(p.idleTimeoutMin || 0);
   updateApiKeyStatus();
   document.getElementById("prefs-modal").classList.add("show");
 }
@@ -1838,9 +2095,11 @@ function openPrefs() {
 function updateApiKeyStatus() {
   const el = document.getElementById("pref-apikey-status");
   if (!el) return;
+  const encrypted = hasEncryptedKey();
   const inLocal = !!localStorage.getItem("vc_api_key");
   const inSession = !!sessionStorage.getItem("vc_api_key");
-  if (inLocal) el.textContent = "saved on this device (localStorage)";
+  if (encrypted) el.innerHTML = "\uD83D\uDD12 <span style=\"color:var(--pass)\">encrypted in localStorage (AES-GCM)</span>";
+  else if (inLocal) el.innerHTML = "<span style=\"color:var(--warn)\">saved plaintext in localStorage</span>";
   else if (inSession) el.textContent = "saved for this tab only (sessionStorage)";
   else el.textContent = "not saved";
 }
@@ -1858,13 +2117,15 @@ function closePrefs() {
 }
 
 function savePrefs() {
+  const idleRaw = parseInt((document.getElementById("pref-idle-timeout") || {value:"0"}).value, 10);
   const p = {
     builder: document.getElementById("pref-builder").value,
     appType: document.getElementById("pref-apptype").value,
     lang: document.getElementById("pref-lang").value,
     vibeCheckDefault: document.getElementById("pref-vibe-default").checked,
     skipInfo: document.getElementById("pref-skip-info").checked,
-    customFocus: document.getElementById("pref-focus").value.slice(0, 1000)
+    customFocus: document.getElementById("pref-focus").value.slice(0, 1000),
+    idleTimeoutMin: Number.isFinite(idleRaw) ? idleRaw : 0
   };
   writePrefs(p);
   _currentPrefs = p;

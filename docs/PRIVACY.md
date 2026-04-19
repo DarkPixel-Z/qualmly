@@ -26,11 +26,21 @@ This document describes exactly what data leaves your browser, who receives it, 
 
 ### Your Anthropic API key
 
-Stored in the browser's **`sessionStorage`** — it lives only in the current browser tab and is wiped when the tab closes.
-
 Transmitted **only to `api.anthropic.com`** via Anthropic's documented `x-api-key` header.
 
 **Never** reaches DarkPixel, the CORS proxies, the Wayback Machine, or any other third party.
+
+Three storage modes, selectable on the API-key modal:
+
+| Mode | Where it lives | Notes |
+|---|---|---|
+| **Tab only** (default) | `sessionStorage` | Wipes when the tab closes. Nothing persists across browser restarts. |
+| **Remember** | `localStorage`, plaintext | Survives restarts. Readable by JavaScript on the VibeCheck origin (so XSS would be a concern) and by anyone with filesystem access to this browser profile. **Not recommended on shared machines.** |
+| **Remember + Encrypt** | `localStorage`, AES-GCM ciphertext | Encrypted at rest with a PBKDF2-derived key (300,000 iterations, SHA-256). You type a passphrase once per session to decrypt. The decrypted key lives in tab memory only. |
+
+**Idle timeout (Preferences):** if set, the in-memory key (and any plaintext-localStorage copy) is wiped after the configured period with no API activity. The encrypted blob itself stays put — user just re-enters their passphrase. Useful for shared machines.
+
+All crypto is done via the browser's built-in Web Crypto API. No third-party cryptography libraries are bundled.
 
 ### Report history
 
