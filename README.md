@@ -64,24 +64,50 @@ Paste any code (30+ languages supported) and get:
 
 ---
 
-## 🛠 Setup
+## 🛠 How to run it
 
-### Option 1 — Just open the file
+Three ways to use VibeCheck, ordered from zero-friction to full control.
+
+### A — Use the hosted version (easiest)
+
+Open **[https://darkpixel-z.github.io/Vibe-QA-Reviewer/vibecheck.html](https://darkpixel-z.github.io/Vibe-QA-Reviewer/vibecheck.html)** in your browser. Bookmark it. Done.
+
+Your Anthropic API key stays in **your** browser (sessionStorage) and only ever leaves your machine to reach Anthropic's servers. The hosted version doesn't send anything anywhere else — we don't operate a server for this tool.
+
+### B — Install as an app
+
+From the hosted URL above, Chrome or Edge will show an **install icon** in the address bar (a little screen-with-arrow). Click it → VibeCheck becomes a desktop app with its own icon and window. No browser chrome, no bookmark to hunt for.
+
+On iPhone/Android: open the URL → browser menu → **"Add to Home Screen"**.
+
+### C — Run it locally (download + serve)
+
+If you bought the Gumroad package, or cloned the repo, you'll have three files you need to keep together:
+
+- `vibecheck.html` — the app
+- `manifest.json` — tells the browser it's a PWA
+- `icon.svg` — the app icon
+
+**Don't just double-click `vibecheck.html`.** Browsers treat `file://` as a "unique security origin," which breaks the Anthropic API call and the URL-crawling proxies. You need to serve the files over HTTP. Easiest way:
+
 ```bash
-# Clone the repo
-git clone https://github.com/DarkPixel-Z/Vibe-QA-Reviewer.git
+# Windows (Python bundled with Windows 10+)
+cd path/to/vibecheck-folder
+python -m http.server 8765
 
-# Open in browser
-open vibecheck.html
+# macOS / Linux
+cd path/to/vibecheck-folder
+python3 -m http.server 8765
+
+# Or with Node (any OS)
+npx http-server -p 8765
 ```
 
-### Option 2 — Host on GitHub Pages
-1. Go to repo **Settings → Pages**
-2. Set source to `main` branch, `/ (root)`
-3. Your app is live at `https://DarkPixel-Z.github.io/Vibe-QA-Reviewer/vibecheck.html`
+Then open **http://localhost:8765/vibecheck.html** in your browser. Leave the terminal running while you use the app; `Ctrl+C` when done.
 
-### Option 3 — Host on your Wix site
-Upload `vibecheck.html` via Wix Media Manager and link to it, or embed via an HTML embed block.
+### D — Host on your own site
+
+Upload all three files (`vibecheck.html`, `manifest.json`, `icon.svg`) to any static-site host — Netlify, Vercel, Cloudflare Pages, GitHub Pages, your Wix site's media library, etc. Point your browser at whatever URL your host gives you.
 
 ---
 
@@ -125,10 +151,18 @@ Use this to verify everything is working:
 
 ```
 Vibe-QA-Reviewer/
-├── vibecheck.html     ← The entire app (single file)
+├── vibecheck.html     ← The entire app (~2600 lines, no build step)
+├── manifest.json      ← PWA manifest — lets Chrome/Edge "Install as app"
+├── icon.svg           ← App icon used by the manifest + browser tab
 ├── README.md          ← This file
-└── LICENSE            ← MIT
+├── LICENSE            ← MIT (public-source terms)
+└── docs/
+    ├── COMMERCIAL-LICENSE.md   ← Rights granted by paid Gumroad tiers
+    ├── DISCLAIMER.md           ← AS-IS / verify-before-shipping
+    └── PRIVACY.md              ← Full data-flow disclosure
 ```
+
+`vibecheck.html`, `manifest.json`, and `icon.svg` must stay in the same directory for the "Install as app" button to appear in Chrome/Edge.
 
 ---
 
