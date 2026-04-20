@@ -206,6 +206,15 @@ The paid Gumroad tiers add commercial rights on top of MIT: email support, 12 mo
 **Do I need my own API key?**
 Yes. VibeCheck calls Anthropic's Claude API directly from your browser using **your** key. Get one at [console.anthropic.com](https://console.anthropic.com). Typical review costs a few cents and the exact amount is shown on every report.
 
+**Is it safe to tick "Remember on this device"?**
+Depends on the machine. Three storage modes are available on the API-key modal:
+
+- **Tab only** (default) — the key lives in `sessionStorage` and wipes when the tab closes. Safest; you retype each session.
+- **Remember** — the key is stored as plaintext in `localStorage`. Survives browser restarts. **Anyone with access to this browser profile can read it** — don't tick on shared or borrowed machines.
+- **Remember + Encrypt with passphrase** — the key is encrypted at rest using AES-GCM with a passphrase-derived PBKDF2 key (Web Crypto, no home-rolled cryptography). Storage is safe against disk-level snooping. You type the passphrase once per session to unlock.
+
+You can also set an **idle-timeout** in Preferences (Never / 30 min / 2 h / 4 h / 8 h / 24 h) that auto-clears the in-memory key after inactivity — useful on shared machines even in plaintext mode.
+
 **What data leaves my machine?**
 - Target URL → 3 third-party CORS proxies (allorigins, codetabs, corsproxy) and optionally Wayback Machine
 - Pasted code or URL summary → Anthropic's API
