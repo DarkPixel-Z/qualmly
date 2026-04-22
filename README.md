@@ -145,7 +145,7 @@ Qualmly uses the **Anthropic Claude API** directly from the browser.
 
 The source in this repository is **MIT** — free to use, fork, study, and modify.
 
-**[Get it on Gumroad →](https://darkpixel6.gumroad.com/l/vbpigw)**
+**[Get it on Gumroad →](https://darkpixel6.gumroad.com/l/qualmly)**
 
 | Tier | Price | What you get |
 |---|---|---|
