@@ -11,3 +11,13 @@ Thumbs.db
 # Editor folders
 .vscode/
 .idea/
+
+# Python build artifacts (mobile-scanner)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+

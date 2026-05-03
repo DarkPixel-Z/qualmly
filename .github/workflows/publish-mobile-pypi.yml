@@ -1,0 +1,53 @@
+name: Publish qualmly-mobile to PyPI
+
+# Triggers:
+#   - Push a tag matching `mobile-v*` (e.g. `mobile-v1.0.0`) → builds + publishes
+#   - Manual workflow_dispatch → useful for re-running after a credential rotation
+on:
+  push:
+    tags:
+      - "mobile-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Trusted Publishing (OIDC) — no PYPI_API_TOKEN secret needed once configured
+  # at https://pypi.org/manage/account/publishing/
+  id-token: write
+
+jobs:
+  build-and-publish:
+    name: Build + publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/qualmly-mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Build sdist + wheel
+        working-directory: mobile-scanner
+        run: |
+          python -m build --sdist --wheel --outdir dist
+
+      - name: Verify package metadata
+        working-directory: mobile-scanner
+        run: |
+          python -m twine check dist/*
+
+      - name: Publish to PyPI (Trusted Publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: mobile-scanner/dist
+          # No `password:` — uses GitHub OIDC. Configure once in PyPI:
+          # https://pypi.org/manage/project/qualmly-mobile/settings/publishing/

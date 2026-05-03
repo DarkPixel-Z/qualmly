@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qualmly-mobile"
+version = "1.0.0"
+description = "APK/IPA secret + endpoint scanner for vibe-coded mobile apps. Companion to Qualmly (qualmly.dev)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+  { name = "DarkPixel Consulting Inc.", email = "hello@qualmly.dev" }
+]
+keywords = [
+  "security",
+  "apk",
+  "ipa",
+  "mobile",
+  "secrets",
+  "scanner",
+  "audit",
+  "vibe-coding",
+  "ci",
+  "qualmly"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Utilities"
+]
+# Stdlib-only; no runtime dependencies.
+dependencies = []
+
+[project.urls]
+Homepage      = "https://qualmly.dev"
+Source        = "https://github.com/DarkPixel-Z/qualmly"
+Issues        = "https://github.com/DarkPixel-Z/qualmly/issues"
+Documentation = "https://qualmly.dev"
+
+[project.scripts]
+qualmly-mobile = "qualmly_mobile:main"
+
+[tool.setuptools]
+py-modules = ["qualmly_mobile"]

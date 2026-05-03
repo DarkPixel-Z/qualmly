@@ -21,21 +21,40 @@ What's NOT done (next iteration):
 3. **Web upload UI** — wrap as a Cloudflare Worker that accepts file upload, runs the same logic, returns a Qualmly-style report. Enables charging $9/scan via Stripe. ~2 days.
 4. **Integration with qualmly.dev** — add a "Mobile" mode tab next to App QA + Code Review. Could be a stub that links to the standalone scanner for now.
 
+## Install
+
+```bash
+# Recommended — installs into an isolated venv, exposes `qualmly-mobile` on PATH
+pipx install qualmly-mobile
+
+# Or vanilla pip if you prefer
+pip install qualmly-mobile
+```
+
+No native dependencies. Stdlib only. Works on macOS, Linux, and Windows
+(Python 3.8+).
+
+If you want to run from source instead, just clone this repo and call the
+script directly with `python3 mobile-scanner/qualmly_mobile.py …` — it has
+zero install dependencies.
+
 ## Usage
 
 ```bash
 # Scan an APK
-python3 qualmly_mobile.py /path/to/app.apk
+qualmly-mobile /path/to/app.apk
 
 # Scan an IPA
-python3 qualmly_mobile.py /path/to/MyApp.ipa
+qualmly-mobile /path/to/MyApp.ipa
 
 # JSON output for CI
-python3 qualmly_mobile.py app.apk --json
+qualmly-mobile app.apk --json
 
 # Write JSON to file
-python3 qualmly_mobile.py app.apk --report scan.json
+qualmly-mobile app.apk --report scan.json
 ```
+
+(If running from source: replace `qualmly-mobile` with `python3 qualmly_mobile.py`.)
 
 Sample output:
 
@@ -81,6 +100,36 @@ A **hosted version** (web upload) is on the roadmap — that gets bundled into t
 | **v1.1** | apktool / smali integration for APK | 1 week |
 | **v1.2** | Cloudflare Worker hosted upload, $9/scan | 2 weeks |
 | **v2** | Mach-O binary scanner (iOS native), mobile-specific findings (root detection bypass, certificate pinning checks) | 4–6 weeks |
+
+## Publishing a new version (maintainer notes)
+
+Releases are published to PyPI via GitHub Actions Trusted Publishing (OIDC) —
+no `PYPI_API_TOKEN` secret needed once the project is registered.
+
+**One-time setup on PyPI:**
+1. Create the project skeleton: build + upload the first release with a
+   manual API token (`twine upload mobile-scanner/dist/*`), OR
+   pre-register it via Trusted Publishing's "pending publisher" flow at
+   https://pypi.org/manage/account/publishing/ → add publisher with:
+   - PyPI Project Name: `qualmly-mobile`
+   - Owner: `DarkPixel-Z`
+   - Repository name: `qualmly`
+   - Workflow name: `publish-mobile-pypi.yml`
+   - Environment name: `pypi`
+2. In the GitHub repo, create a `pypi` environment (Settings → Environments)
+   so the workflow's `environment: pypi` clause resolves.
+
+**Cutting a release:**
+```bash
+# bump __version__ in qualmly_mobile.py and version in pyproject.toml
+git add mobile-scanner/qualmly_mobile.py mobile-scanner/pyproject.toml
+git commit -m "mobile-scanner: bump to v1.0.1"
+git tag mobile-v1.0.1
+git push origin main --tags
+```
+
+The `Publish qualmly-mobile to PyPI` workflow fires on the tag, builds
+sdist + wheel, runs `twine check`, then uploads via OIDC.
 
 ## License
 

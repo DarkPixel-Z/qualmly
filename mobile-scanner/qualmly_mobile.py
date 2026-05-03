@@ -37,6 +37,8 @@ import zipfile
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+__version__ = "1.0.0"
+
 # Same 9 secret-detection patterns the qualmly.dev Code Review uses.
 # Keep in sync with index.html SECRET_PATTERNS.
 SECRET_PATTERNS: List[Tuple[str, str]] = [
