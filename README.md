@@ -220,7 +220,7 @@ qualmly/
 | Project | Repo | Status |
 |---|---|---|
 | **GitHub Action** — Qualmly Code Review on every PR | [`DarkPixel-Z/qualmly-audit-action`](https://github.com/DarkPixel-Z/qualmly-audit-action) | ✅ v1.0.0 shipped |
-| **Chrome extension** — `Ctrl+Shift+Q` to audit current tab | [`extensions/chrome/`](./extensions/chrome) | 🟡 Working stub (needs icons + Web Store) |
+| **Chrome extension** — `Ctrl+Shift+Q` to audit current tab | [`extensions/chrome/`](./extensions/chrome) | 🟠 Coming soon — Web Store submission queued; pending D-U-N-S business verification (~1–4 weeks) |
 | **Mobile APK/IPA scanner** — secrets + endpoints in mobile builds | [`mobile-scanner/`](./mobile-scanner) | ✅ v1 Python CLI |
 | **Continuous monitoring** — scheduled rescans + email diffs | [`workers/monitoring/`](./workers/monitoring) | 🟡 Architectural scaffold |
 
