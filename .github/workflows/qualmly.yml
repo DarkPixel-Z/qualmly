@@ -1,0 +1,33 @@
+# Qualmly Audit — runs on every PR to this repo as a self-test of our own
+# GitHub Action. Posts findings as a PR comment. Uses ANTHROPIC_API_KEY repo
+# secret. Falls back gracefully if the secret isn't set (logs a warning, doesn't
+# fail the run).
+name: Qualmly Audit
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  # Allow manual trigger so we can re-run on demand without opening a fake PR
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Skip when the secret isn't set yet — keeps PRs from forks/contributors
+    # from failing during initial setup.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    steps:
+      - name: Run Qualmly Audit
+        uses: DarkPixel-Z/qualmly-audit-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          builder: claude-code   # this repo's contributors mostly use Claude Code
+          fail_on: never         # informational only — don't block PRs to qualmly itself
+          max_files: 12
+          max_kb_per_file: 80
