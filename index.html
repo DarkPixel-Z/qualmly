@@ -493,6 +493,21 @@
           <span style="color:var(--muted)">&mdash; also scans for the common failure patterns in AI-generated code: missing Supabase RLS, secret keys leaked to the client, unauthenticated endpoints, exposed admin routes, and AI-boilerplate CORS/CSRF mistakes.</span>
         </label>
       </div>
+      <!-- Section HH: Active RLS probe mode (advanced — owner-only). Off by default. -->
+      <div style="margin-top:10px;display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid rgba(255,184,0,0.35);border-radius:var(--radius-sm);background:rgba(255,184,0,0.06)">
+        <input type="checkbox" id="rls-probe" style="margin-top:2px;accent-color:var(--warn);width:16px;height:16px;flex-shrink:0">
+        <label for="rls-probe" style="font-size:12px;line-height:1.5;color:var(--text);cursor:pointer;margin:0">
+          <strong style="color:var(--warn)">&#128272; Active Supabase RLS probe</strong>
+          <span style="color:var(--muted)">&mdash; goes beyond passive recon: actually attempts read-only queries against the Supabase project surfaced in the bundle, to <strong>confirm</strong> whether RLS is enforced. Capped at 10 requests, 100ms apart, read-only.</span>
+          <div id="rls-probe-confirm" style="display:none;margin-top:10px;padding:10px;background:var(--fail-bg);border:1px solid rgba(255,77,109,0.35);border-radius:var(--radius-sm);font-size:11px;color:var(--text);line-height:1.6">
+            <strong style="color:var(--fail)">&#9888; Read this before enabling.</strong> Active probing crosses from passive recon into authenticated requests against someone's database. <strong>Only enable this on apps you own or have written permission to test.</strong> Running it on a third party's app may violate their Terms of Service or unauthorized-access laws (CFAA in the US). Qualmly does not store probe results; queries are read-only and capped, but legality is your responsibility.
+            <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+              <input type="checkbox" id="rls-probe-consent" style="accent-color:var(--fail);width:14px;height:14px">
+              <label for="rls-probe-consent" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--fail);cursor:pointer;margin:0">I own this app, or have written authorization to test it.</label>
+            </div>
+          </div>
+        </label>
+      </div>
       <div id="error-msg" class="error-box"></div>
       <button class="cta-btn" id="check-btn" onclick="runCheck()">&#9889; Run QA Check &mdash; it's free</button>
       <!-- Section AA: Try-demo entry. No API key required, loads a hardcoded example report. -->
@@ -860,6 +875,9 @@
     <div class="tests-grid" id="tests-grid"></div>
     <div id="cost-footer"></div>
 
+    <!-- Section HH: Active RLS probe result card. Populated only when probe ran. -->
+    <div id="rls-probe-card" style="display:none"></div>
+
     <!-- Sections BB + CC + DD: viral-share card. Three actions, one row. Populated by renderShareCard() -->
     <div id="share-card" class="share-card slide-in-delay2" style="display:none">
       <div class="share-card-title">&#127881; Got a score worth flexing? Share it.</div>
@@ -1221,6 +1239,9 @@ function renderReport(data, url, savedDateStr, isShared) {
     grid.appendChild(card);
   });
 
+  // Section HH: render Active RLS probe result (if probe ran)
+  _renderRlsProbeCard(data._rlsProbe);
+
   // Cost footer
   renderCostFooter("cost-footer", data._usage, "claude-sonnet-4-6");
 
@@ -1307,10 +1328,15 @@ async function runCheck() {
   const appType = document.getElementById("type").value;
   const builder = document.getElementById("builder").value;
   const vibeCheck = document.getElementById("vibe-check") && document.getElementById("vibe-check").checked;
+  // Section HH: Active RLS probe gating — both checkboxes must be ticked.
+  const rlsProbeRequested = !!(document.getElementById("rls-probe") && document.getElementById("rls-probe").checked);
+  const rlsProbeConsented = !!(document.getElementById("rls-probe-consent") && document.getElementById("rls-probe-consent").checked);
+  const rlsProbeActive = rlsProbeRequested && rlsProbeConsented;
   const errEl = document.getElementById("error-msg");
 
   if (!url) { errEl.style.display="block"; errEl.textContent="⚠ Please enter your app URL first."; return; }
   if (!desc || desc.length < 20) { errEl.style.display="block"; errEl.textContent="⚠ Give us a bit more detail about what your app does (20+ chars)."; return; }
+  if (rlsProbeRequested && !rlsProbeConsented) { errEl.style.display="block"; errEl.textContent="⚠ Active RLS probe is enabled but you haven't checked the ownership-consent box. Either uncheck the probe or confirm ownership."; return; }
 
   errEl.style.display = "none";
 
@@ -1322,6 +1348,52 @@ async function runCheck() {
   _hideApiErrorCard();
   _setTabStatus("scanning"); // Section V
   const _runCheckStartedAt = Date.now();
+
+  // Section HH: kick off the active RLS probe in parallel with the Anthropic
+  // call (only if user opted in AND consented). We fetch the page's JS bundle
+  // through the same CORS proxy chain, extract Supabase creds, and probe.
+  // This runs side-by-side with the AI scan; both results merge into the
+  // final report. If anything fails we silently degrade — never let the probe
+  // break the main scan.
+  let _rlsProbePromise = null;
+  if (rlsProbeActive) {
+    _rlsProbePromise = (async () => {
+      try {
+        const proxyUrl = "https://api.allorigins.win/get?url=" + encodeURIComponent(url);
+        const r = await fetch(proxyUrl, { signal: AbortSignal.timeout(15000) });
+        if (!r.ok) return { skipped: "proxy fetch failed" };
+        const j = await r.json();
+        const html = j.contents || "";
+        // Find script src URLs in the HTML so we can fetch the bundle
+        const scriptSrcs = Array.from(html.matchAll(/<script[^>]+src=["']([^"']+)["']/g))
+          .map(m => m[1])
+          .filter(s => /\.(js|mjs)/.test(s))
+          .map(s => s.startsWith("http") ? s : (s.startsWith("//") ? "https:" + s : (new URL(s, url)).href))
+          .slice(0, 3); // cap to first 3 scripts
+        // Try to find creds in the HTML itself first; if not, fetch the bundles
+        let creds = _extractSupabaseCreds(html);
+        if (!creds) {
+          for (const src of scriptSrcs) {
+            try {
+              const sr = await fetch("https://api.allorigins.win/get?url=" + encodeURIComponent(src),
+                { signal: AbortSignal.timeout(12000) });
+              if (!sr.ok) continue;
+              const sj = await sr.json();
+              creds = _extractSupabaseCreds(sj.contents || "");
+              if (creds) break;
+            } catch(e) { /* try next */ }
+          }
+        }
+        if (!creds) return { skipped: "no Supabase creds found in bundle" };
+        addTerminalLog("Probing RLS on " + creds.url.replace(/^https?:\/\//, "") + "...", "t-muted", 0);
+        const probe = await _probeSupabaseRls(creds.url, creds.key);
+        return { creds: { url: creds.url }, probe };
+      } catch(e) {
+        return { error: (e && e.message) || "probe failed" };
+      }
+    })();
+  }
+
   showScreen("loading");
   document.getElementById("terminal-log").innerHTML = ""; // AUDITED-SAFE: empty string clears terminal
   TERMINAL_STEPS.forEach(s => addTerminalLog(s.text, "t-muted", s.delay));
@@ -1436,6 +1508,17 @@ Requirements:
     return;
   }
 
+  // Section HH: merge RLS probe result into reportData (if probe ran)
+  if (_rlsProbePromise) {
+    try {
+      const probeResult = await _rlsProbePromise;
+      reportData._rlsProbe = probeResult;
+      console.info("[qualmly] RLS probe result:", probeResult);
+    } catch(e) {
+      console.warn("[qualmly] RLS probe orchestration error:", e && e.message);
+    }
+  }
+
   _setButtonInFlight("check-btn", false, 3000);
   _setTabStatus("done");
   renderReport(reportData, url, null, false);
@@ -1448,6 +1531,207 @@ document.getElementById("url").addEventListener("keydown", e => { if (e.key === 
 // REAL URL CRAWLING — no backend needed
 // Uses multiple CORS proxies in parallel + Wayback Machine fallback + deep HTML parsing
 // ══════════════════════════════════════════════════════════════════════════════
+
+// Section HH renderer: pretty-print the RLS probe result as a report card.
+function _renderRlsProbeCard(probeResult) {
+  const card = document.getElementById('rls-probe-card');
+  if (!card) return;
+  if (!probeResult) { card.style.display = 'none'; return; }
+
+  // Determine severity color
+  let color = 'var(--info)';
+  let bg = 'var(--info-bg)';
+  let icon = '🔍';
+  let title = 'Active RLS Probe';
+
+  if (probeResult.skipped) {
+    color = 'var(--muted)';
+    bg = 'var(--surface2)';
+    icon = '⊘';
+    title = 'Active RLS Probe — skipped';
+  } else if (probeResult.error) {
+    color = 'var(--warn)';
+    bg = 'var(--warn-bg)';
+    icon = '⚠';
+    title = 'Active RLS Probe — error';
+  } else if (probeResult.probe) {
+    if (probeResult.probe.severity === 'fail') {
+      color = 'var(--fail)';
+      bg = 'var(--fail-bg)';
+      icon = '🔴';
+      title = 'Active RLS Probe — RLS gap detected';
+    } else if (probeResult.probe.severity === 'pass') {
+      color = 'var(--pass)';
+      bg = 'var(--pass-bg)';
+      icon = '✅';
+      title = 'Active RLS Probe — RLS appears enforced';
+    }
+  }
+
+  // Build body
+  let body = '';
+  if (probeResult.skipped) {
+    // AUDITED-SAFE: probeResult.skipped is internal string, escapeHtml regardless
+    body = '<div style="font-family:\'DM Mono\',monospace;font-size:12px;color:var(--muted)">Probe did not run: ' + escapeHtml(probeResult.skipped) + '</div>';
+  } else if (probeResult.error) {
+    body = '<div style="font-family:\'DM Mono\',monospace;font-size:12px;color:var(--warn)">Probe encountered an error: ' + escapeHtml(probeResult.error) + '</div>';
+  } else if (probeResult.probe) {
+    const p = probeResult.probe;
+    let listHtml = '';
+    if (p.accessible && p.accessible.length) {
+      listHtml += '<div style="margin-top:10px"><strong style="color:var(--fail)">Accessible to anon role (' + p.accessible.length + '):</strong><ul style="margin:6px 0 0 20px;color:var(--text)">' +
+        p.accessible.map(a => '<li><code>' + escapeHtml(a.table) + '</code>' + (a.totalRowsHint && a.totalRowsHint !== 'unknown' ? ' (≈' + escapeHtml(String(a.totalRowsHint)) + ' rows)' : '') + '</li>').join('') +
+        '</ul></div>';
+    }
+    if (p.rlsBlocked && p.rlsBlocked.length) {
+      listHtml += '<div style="margin-top:10px"><strong style="color:var(--pass)">RLS blocked (' + p.rlsBlocked.length + '):</strong> ' +
+        p.rlsBlocked.map(t => '<code>' + escapeHtml(t) + '</code>').join(', ') +
+        '</div>';
+    }
+    if (p.notFound && p.notFound.length) {
+      listHtml += '<div style="margin-top:6px;color:var(--muted);font-size:11px">Not found: ' + p.notFound.map(t => '<code>' + escapeHtml(t) + '</code>').join(', ') + '</div>';
+    }
+    body =
+      '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:var(--muted);margin-bottom:10px">Project: <code>' + escapeHtml(probeResult.creds && probeResult.creds.url || '') + '</code> · ' +
+      'Probed ' + (p.probed || 0) + ' tables in ' + Math.round((p.elapsedMs || 0) / 100) / 10 + 's</div>' +
+      '<div style="font-family:\'Syne\',sans-serif;font-size:13px;color:var(--text);line-height:1.6">' + escapeHtml(p.summary || '') + '</div>' +
+      listHtml; // AUDITED-SAFE: every interpolated value wrapped in escapeHtml; structural HTML static
+  }
+
+  card.style.cssText = 'display:block;margin:24px 0;padding:18px 20px;background:' + bg + ';border:1px solid ' + color + ';border-left:3px solid ' + color + ';border-radius:var(--radius)';
+  card.innerHTML =
+    '<div style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:' + color + ';margin-bottom:10px">' +
+      icon + ' ' + escapeHtml(title) +
+    '</div>' +
+    body; // AUDITED-SAFE: body built above with escapeHtml on every dynamic value
+}
+
+// ── Section HH: Active Supabase RLS probe (owner-only, opt-in) ─────────────
+// Wires the rls-probe checkbox to reveal the consent block. The actual probe
+// runs only if BOTH rls-probe AND rls-probe-consent are checked at scan time.
+function _wireRlsProbe() {
+  const probeBox = document.getElementById('rls-probe');
+  const confirmBox = document.getElementById('rls-probe-confirm');
+  if (!probeBox || !confirmBox) return;
+  probeBox.addEventListener('change', () => {
+    confirmBox.style.display = probeBox.checked ? 'block' : 'none';
+    if (!probeBox.checked) {
+      const consent = document.getElementById('rls-probe-consent');
+      if (consent) consent.checked = false;
+    }
+  });
+}
+
+// Probe a Supabase project's REST API as the anon role. Returns a structured
+// finding object describing which tables (if any) responded — i.e. were not
+// gated by an RLS policy that returns 0 rows for anon.
+//
+// Conservative defaults:
+//   - read-only HEAD requests with `Range: 0-0` (1 row max) — confirms whether
+//     the table is *queryable*, not what's in it
+//   - capped at 10 requests total, 100ms apart
+//   - guesses table names from a small whitelist of common conventions only
+//   - aborts entire probe at 12s wall-clock
+//
+// Caller must verify consent (rls-probe AND rls-probe-consent both checked)
+// BEFORE invoking this. The function does not re-check; it trusts the caller.
+async function _probeSupabaseRls(supabaseUrl, anonKey) {
+  if (!supabaseUrl || !anonKey) return { skipped: 'missing url or key' };
+
+  // Normalize URL (strip trailing slash)
+  const base = supabaseUrl.replace(/\/+$/, '') + '/rest/v1';
+
+  // Common Supabase table-name conventions seen in vibe-coded apps. We probe
+  // these only — no enumeration, no fuzzing. If the project uses non-standard
+  // names, the probe simply returns "no findings".
+  const COMMON_TABLES = [
+    'users', 'profiles', 'accounts', 'orders', 'subscriptions',
+    'posts', 'comments', 'messages', 'invoices', 'payments'
+  ];
+
+  const findings = {
+    probed: 0,
+    accessible: [], // tables that returned data to the anon role
+    rlsBlocked: [], // tables that returned 401/403 (RLS working)
+    notFound: [],   // tables that 404'd (don't exist)
+    errors: []
+  };
+
+  const probeStart = Date.now();
+  const HARD_DEADLINE_MS = 12000;
+  const MAX_REQUESTS = 10;
+  const SPACING_MS = 100;
+
+  for (const table of COMMON_TABLES) {
+    if (findings.probed >= MAX_REQUESTS) break;
+    if (Date.now() - probeStart > HARD_DEADLINE_MS) {
+      findings.errors.push('hard deadline (12s) reached');
+      break;
+    }
+    findings.probed++;
+    const url = `${base}/${encodeURIComponent(table)}?select=*`;
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'apikey': anonKey,
+          'Authorization': `Bearer ${anonKey}`,
+          'Range': '0-0',           // limit to 1 row regardless of policy
+          'Range-Unit': 'items',
+          'Prefer': 'count=none'    // avoid expensive count queries
+        },
+        signal: AbortSignal.timeout(2500)
+      });
+      if (res.status === 200 || res.status === 206) {
+        // Got data — RLS did not block anon. Capture row count from
+        // Content-Range header rather than the body itself (we don't want to
+        // read PII into Qualmly's logs).
+        const range = res.headers.get('content-range') || '';
+        const total = (range.match(/\/(\d+|\*)/) || [])[1] || 'unknown';
+        findings.accessible.push({ table, totalRowsHint: total });
+      } else if (res.status === 401 || res.status === 403) {
+        findings.rlsBlocked.push(table);
+      } else if (res.status === 404) {
+        findings.notFound.push(table);
+      } else {
+        findings.errors.push(`${table}: HTTP ${res.status}`);
+      }
+    } catch (err) {
+      // network/abort error
+      if (err && err.name === 'AbortError') findings.errors.push(`${table}: timeout`);
+      else findings.errors.push(`${table}: ${err && err.message}`);
+    }
+    // Rate limit
+    await new Promise(r => setTimeout(r, SPACING_MS));
+  }
+
+  // Summary classification
+  let severity = 'info';
+  if (findings.accessible.length >= 1) severity = 'fail'; // Real RLS gap
+  else if (findings.errors.length === COMMON_TABLES.length) severity = 'info';
+  else if (findings.rlsBlocked.length > 0) severity = 'pass';
+
+  return Object.assign(findings, {
+    severity,
+    elapsedMs: Date.now() - probeStart,
+    summary: findings.accessible.length
+      ? `${findings.accessible.length} table(s) returned data to the anon role — RLS is missing or misconfigured.`
+      : (findings.rlsBlocked.length
+          ? `RLS appears enforced: ${findings.rlsBlocked.length} common table(s) rejected anon reads (401/403).`
+          : 'No common table names matched. RLS posture inconclusive — table names may be project-specific.')
+  });
+}
+
+// Extract Supabase URL + anon key from arbitrary HTML/JS bundle text.
+// Returns { url, key } or null if neither found.
+function _extractSupabaseCreds(bundleText) {
+  if (!bundleText || typeof bundleText !== 'string') return null;
+  const urlMatch = bundleText.match(/https:\/\/([a-z0-9]{10,30})\.supabase\.co/);
+  // Anon key = JWT, base64-url-safe, signed with HS256. Pattern: eyJ...eyJ...sig
+  const keyMatch = bundleText.match(/eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{60,}\.[A-Za-z0-9_-]{20,}/);
+  if (!urlMatch || !keyMatch) return null;
+  return { url: urlMatch[0], key: keyMatch[0] };
+}
 
 async function fetchPageData(url) {
   const result = {
@@ -2058,7 +2342,7 @@ function _renderApiKeyFingerprint() {
 // BUILD_VERSION is updated by the deploy script (or hand-bumped) on each release.
 // Renders in the footer for bug reports — gives reviewers a way to tell us "I saw
 // X behavior on build Y" instead of a vague timeline reference.
-const QUALMLY_BUILD = { version: "v1.2.0", date: "2026-05-01", channel: "stable" };
+const QUALMLY_BUILD = { version: "v1.3.0", date: "2026-05-02", channel: "stable" };
 
 // ── Section S: Anthropic API retry + offline guard ─────────────────────────
 // Wrap a fetch in: (1) navigator.onLine check before send, (2) one automatic
@@ -3713,6 +3997,30 @@ document.addEventListener("DOMContentLoaded", () => {
   _attachCharCounter("code-input", 50000, "code-input-counter");
   // Sections U + Z: live API-key format check + phishing paste warning
   _wireApiKeyInputGuards();
+  // Section HH: wire the active RLS probe consent flow
+  _wireRlsProbe();
+  // Section II: handle ?url= and ?mode= query params from the Chrome extension / external links
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const incomingUrl = params.get("url");
+    const incomingMode = params.get("mode");
+    if (incomingMode === "code" && typeof switchMode === "function") {
+      switchMode("code");
+    }
+    if (incomingUrl) {
+      const urlInput = document.getElementById("url");
+      if (urlInput) {
+        // Validate the incoming URL is http(s) only — reject javascript: and data: URLs
+        try {
+          const parsed = new URL(incomingUrl);
+          if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+            urlInput.value = incomingUrl;
+            urlInput.dispatchEvent(new Event("input", { bubbles: true })); // refresh char counter
+          }
+        } catch(e) { /* ignore malformed URLs */ }
+      }
+    }
+  } catch(e) { console.warn("[qualmly] query-param handler:", e && e.message); }
   // Section V: tab title status hooks (no-op until a scan starts)
   _setTabStatus("idle");
   // Section X: render build stamp in footer

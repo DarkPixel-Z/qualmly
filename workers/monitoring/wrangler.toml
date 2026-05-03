@@ -1,0 +1,33 @@
+name = "qualmly-monitor"
+main = "src/index.js"
+compatibility_date = "2026-04-01"
+
+# Cron trigger: runs every hour. Pass-through to scheduled() handler.
+[triggers]
+crons = ["0 * * * *"]
+
+# KV namespaces — create these in `wrangler kv:namespace create <NAME>` first,
+# then paste the IDs here.
+[[kv_namespaces]]
+binding = "USERS"
+id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+
+[[kv_namespaces]]
+binding = "WATCHES"
+id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+
+[[kv_namespaces]]
+binding = "HISTORY"
+id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+
+# Secrets (set via `wrangler secret put <NAME>`):
+#   - RESEND_API_KEY      — for sending diff emails (resend.com)
+#   - STRIPE_SECRET_KEY   — for verifying webhooks
+#   - STRIPE_WEBHOOK_SECRET
+
+[observability]
+enabled = true
+
+# Limits — keep this Worker on the free tier as long as possible
+[limits]
+cpu_ms = 50

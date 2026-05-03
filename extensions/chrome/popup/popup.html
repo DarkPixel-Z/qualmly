@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://qualmly.dev">
+<title>Qualmly</title>
+<style>
+  :root {
+    --bg: #0E0E15;
+    --surface: #17171F;
+    --border: #2E2E3E;
+    --lime: #D4FF4F;
+    --lime-bright: #EBFF78;
+    --text: #F2F2F5;
+    --muted: #7B7B90;
+    --warn: #FFB800;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 320px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 16px;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .logo-icon {
+    width: 28px;
+    height: 28px;
+    background: linear-gradient(135deg, var(--lime), var(--lime-bright));
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    color: var(--bg);
+  }
+  .logo-text {
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+  }
+  .logo-text span { color: var(--lime); }
+  .url-display {
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin-bottom: 14px;
+  }
+  .btn {
+    display: block;
+    width: 100%;
+    background: var(--lime);
+    color: var(--bg);
+    border: none;
+    border-radius: 6px;
+    padding: 11px;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+    margin-bottom: 8px;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.9; }
+  .btn-secondary {
+    background: transparent;
+    color: var(--muted);
+    border: 1px dashed var(--border);
+    font-size: 11px;
+    font-family: 'SF Mono', monospace;
+    padding: 8px;
+  }
+  .footer {
+    font-family: 'SF Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+    text-align: center;
+  }
+  .footer a { color: var(--lime); text-decoration: none; }
+  .warn-line {
+    font-size: 10px;
+    color: var(--warn);
+    background: rgba(255,184,0,0.08);
+    border: 1px solid rgba(255,184,0,0.25);
+    padding: 6px 8px;
+    border-radius: 4px;
+    margin-bottom: 10px;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+  <div class="logo">
+    <div class="logo-icon">&#9889;</div>
+    <div class="logo-text">Qualm<span>ly</span></div>
+  </div>
+
+  <div id="url-display" class="url-display">Loading current tab...</div>
+
+  <div class="desc">
+    Audit this app with Qualmly. The full tool runs in a new tab — your Anthropic API key never leaves your browser.
+  </div>
+
+  <button id="audit-btn" class="btn">&#9889; Audit this tab</button>
+  <button id="audit-btn-code" class="btn btn-secondary">&#128196; Open Code Review instead</button>
+
+  <div id="warn" class="warn-line" style="display:none"></div>
+
+  <div class="footer">
+    Powered by <a href="https://qualmly.dev" target="_blank">qualmly.dev</a>
+    &middot; <a href="https://github.com/DarkPixel-Z/qualmly" target="_blank">Open source</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Qualmly — Audit this tab",
+  "short_name": "Qualmly",
+  "version": "1.0.0",
+  "description": "One-click security + QA audit for the AI-built app you're currently looking at. Powered by qualmly.dev.",
+  "homepage_url": "https://qualmly.dev",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Audit this tab with Qualmly",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://qualmly.dev/*"
+  ],
+  "commands": {
+    "audit-current-tab": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Q",
+        "mac": "Command+Shift+Q"
+      },
+      "description": "Audit the current tab with Qualmly"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://qualmly.dev; connect-src 'self' https://qualmly.dev"
+  }
+}
