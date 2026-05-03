@@ -414,6 +414,7 @@
     <div class="mode-tabs">
       <button class="mode-tab active" id="tab-qa" onclick="switchMode('qa')">&#9889; App QA</button>
       <button class="mode-tab" id="tab-code" onclick="switchMode('code')">&#128196; Code Review</button>
+      <button class="mode-tab" id="tab-monitor" onclick="switchMode('monitor')" title="Continuous monitoring &mdash; weekly rescans by email">&#128338; Monitor</button>
     </div>
     <!-- Section GG: domain verification banner — populated by _renderDomainBanner() -->
     <span id="domain-banner" style="display:none"></span>
@@ -425,6 +426,7 @@
   <div class="wrap mobile-mode-switch">
     <button class="mobile-mode-btn active" id="mtab-qa" onclick="switchMode('qa')">&#9889; App QA</button>
     <button class="mobile-mode-btn" id="mtab-code" onclick="switchMode('code')">&#128196; Code Review</button>
+    <button class="mobile-mode-btn" id="mtab-monitor" onclick="switchMode('monitor')">&#128338; Monitor</button>
   </div>
 
   <div id="input-screen">
@@ -678,6 +680,198 @@
     </div>
   </div>
 
+  <!-- ========== MONITOR (CONTINUOUS MONITORING) SCREEN ========== -->
+  <!--
+    Section MM: Monitor mode UI for the Pro tier ($99/yr).
+    Three sub-states inside this single screen, controlled by JS:
+      • #monitor-pitch       — not registered yet → marketing copy + Subscribe
+      • #monitor-onboard     — returned from Stripe → collect passphrase + key + first watch
+      • #monitor-dashboard   — registered + active → list of watches + Add new
+    All API calls go to MONITOR_API_BASE (defaults to https://monitor.qualmly.dev).
+    BYOK is preserved end-to-end: the Anthropic key is encrypted in the browser
+    with the user's passphrase before it ever leaves; passphrase is server-side
+    wrapped with a Worker secret (SERVICE_PASSPHRASE_SALT) so a KV breach alone
+    can't decrypt anything.
+  -->
+  <div id="monitor-screen" style="display:none">
+    <div class="hero">
+      <div class="hero-eyebrow">Continuous monitoring &middot; Pro tier</div>
+      <h1>Catch regressions <span class="accent">while you sleep.</span></h1>
+      <p class="hero-sub">Qualmly rescans your live app every week, diffs the findings, emails you when something new breaks. $99/yr per app.</p>
+    </div>
+
+    <!-- ── State A: Pitch / Subscribe ──────────────────────────────────── -->
+    <div id="monitor-pitch" class="form-card">
+      <div style="display:grid;gap:14px">
+        <div style="display:flex;align-items:flex-start;gap:14px">
+          <div style="flex-shrink:0;background:var(--lime);color:#0C0C10;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:14px">1</div>
+          <div>
+            <div style="font-weight:700;color:var(--text);margin-bottom:3px">Subscribe via Stripe</div>
+            <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);line-height:1.6">$99/yr per app. Cancel anytime. 14-day refund window.</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:14px">
+          <div style="flex-shrink:0;background:var(--lime-dim);color:var(--lime);border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:14px">2</div>
+          <div>
+            <div style="font-weight:700;color:var(--text);margin-bottom:3px">Encrypt your Anthropic key in the browser</div>
+            <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);line-height:1.6">BYOK preserved. Your key is AES-GCM encrypted with a passphrase you set, before it ever leaves your machine. Same crypto as App QA mode.</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:14px">
+          <div style="flex-shrink:0;background:var(--lime-dim);color:var(--lime);border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:14px">3</div>
+          <div>
+            <div style="font-weight:700;color:var(--text);margin-bottom:3px">Pick what to watch &amp; how often</div>
+            <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);line-height:1.6">App URL + builder + scan interval (1, 7, 14, 30 days). We diff each scan against the last and email you only when findings change.</div>
+          </div>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--border);margin-top:18px;padding-top:18px;display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+        <button id="monitor-subscribe-btn" class="check-btn" onclick="monitorSubscribe()" style="flex:1;min-width:200px">
+          &#9889; Subscribe &mdash; $99/yr
+        </button>
+        <button class="reset-btn" onclick="monitorShowOnboard()" title="Already paid? Continue setup">
+          I already paid &rarr;
+        </button>
+      </div>
+      <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);margin-top:10px;line-height:1.6">
+        <strong style="color:var(--text)">Free tier still does the one-shot audit.</strong> This Pro tier is for teams who ship to production weekly and want the radar always on.
+      </div>
+    </div>
+
+    <!-- ── State B: Onboard (post-Stripe) ──────────────────────────────── -->
+    <div id="monitor-onboard" class="form-card" style="display:none">
+      <div class="section-header" style="margin-bottom:18px">
+        <span class="section-icon">&#9654;</span> Set up your first watch
+      </div>
+      <div style="background:var(--pass-bg);border:1px solid rgba(61,255,160,0.25);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:18px;font-family:'DM Mono',monospace;font-size:11px;color:var(--pass);display:flex;align-items:center;gap:8px">
+        <span>&#10003;</span> Subscription active. Set a passphrase to encrypt your Anthropic key.
+      </div>
+
+      <div class="form-group">
+        <label for="mon-email">Email for diff alerts</label>
+        <div class="input-wrap">
+          <input type="email" id="mon-email" placeholder="you@yourcompany.com" autocomplete="off" spellcheck="false" maxlength="200" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:11px 14px;outline:none;font-weight:500">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="mon-passphrase">Passphrase (used to encrypt your key)</label>
+        <div class="input-wrap">
+          <input type="password" id="mon-passphrase" placeholder="At least 12 characters" autocomplete="new-password" spellcheck="false" maxlength="200" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:11px 14px;outline:none;font-weight:500">
+        </div>
+        <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);margin-top:6px;line-height:1.6">
+          Write this down. Without it, your watches stop until you re-register.
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="mon-anthropic-key">Anthropic API key (sk-ant-&hellip;)</label>
+        <div class="input-wrap">
+          <input type="password" id="mon-anthropic-key" placeholder="sk-ant-api03-&hellip;" autocomplete="off" spellcheck="false" maxlength="500" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:11px 14px;outline:none;font-weight:500">
+        </div>
+        <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--pass);margin-top:6px;display:flex;align-items:center;gap:6px">
+          <span>&#10003;</span><span>Encrypted in your browser before send. Same crypto as App QA.</span>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="mon-watch-url">First app URL to watch</label>
+        <div class="input-wrap">
+          <span class="input-prefix">&#128279;</span>
+          <input type="text" id="mon-watch-url" class="has-prefix" placeholder="https://my-cool-app.lovable.app" autocomplete="off" spellcheck="false" maxlength="2000">
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="mon-builder">Builder</label>
+          <select id="mon-builder" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:11px 14px;outline:none;font-weight:500">
+            <option value="lovable">Lovable</option>
+            <option value="bolt">Bolt.new</option>
+            <option value="v0">v0 by Vercel</option>
+            <option value="cursor">Cursor</option>
+            <option value="claude-code">Claude Code</option>
+            <option value="windsurf">Windsurf</option>
+            <option value="replit">Replit</option>
+            <option value="copilot">GitHub Copilot</option>
+            <option value="webflow">Webflow + AI</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="mon-interval">Scan every</label>
+          <select id="mon-interval" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:11px 14px;outline:none;font-weight:500">
+            <option value="1">1 day</option>
+            <option value="7" selected>7 days (recommended)</option>
+            <option value="14">14 days</option>
+            <option value="30">30 days</option>
+          </select>
+        </div>
+      </div>
+
+      <button id="monitor-register-btn" class="check-btn" onclick="monitorRegisterAndAddWatch()" style="width:100%;margin-top:8px">
+        &#9889; Activate monitoring
+      </button>
+      <div id="monitor-onboard-error" class="error-box"></div>
+    </div>
+
+    <!-- ── State C: Dashboard (registered + active) ───────────────────── -->
+    <div id="monitor-dashboard" style="display:none">
+      <div class="form-card" style="margin-bottom:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+          <div class="section-header" style="margin:0;border:none;padding:0">
+            <span class="section-icon">&#128338;</span> Active watches
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="reset-btn" onclick="monitorShowAddWatchForm()" title="Add another watch">+ Add watch</button>
+            <button class="reset-btn" onclick="monitorRefreshDashboard()" title="Refresh from server">&#8635;</button>
+            <button class="reset-btn" onclick="monitorSignOut()" title="Sign out of Monitor">Sign out</button>
+          </div>
+        </div>
+        <div id="monitor-watches-list" style="display:grid;gap:10px"></div>
+      </div>
+
+      <div id="monitor-add-watch-card" class="form-card" style="display:none">
+        <div class="section-header"><span class="section-icon">&#9655;</span> Add another watch</div>
+        <div class="form-group">
+          <label for="mon-add-url">App URL</label>
+          <div class="input-wrap">
+            <span class="input-prefix">&#128279;</span>
+            <input type="text" id="mon-add-url" class="has-prefix" placeholder="https://&hellip;" autocomplete="off" spellcheck="false" maxlength="2000">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="mon-add-builder">Builder</label>
+            <select id="mon-add-builder" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:11px 14px">
+              <option value="lovable">Lovable</option>
+              <option value="bolt">Bolt.new</option>
+              <option value="v0">v0 by Vercel</option>
+              <option value="cursor">Cursor</option>
+              <option value="claude-code">Claude Code</option>
+              <option value="windsurf">Windsurf</option>
+              <option value="replit">Replit</option>
+              <option value="copilot">GitHub Copilot</option>
+              <option value="webflow">Webflow + AI</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="mon-add-interval">Scan every</label>
+            <select id="mon-add-interval" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:var(--radius-sm);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:11px 14px">
+              <option value="1">1 day</option>
+              <option value="7" selected>7 days</option>
+              <option value="14">14 days</option>
+              <option value="30">30 days</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="check-btn" onclick="monitorAddWatch()" style="flex:1">+ Add watch</button>
+          <button class="reset-btn" onclick="monitorHideAddWatchForm()">Cancel</button>
+        </div>
+        <div id="monitor-add-watch-error" class="error-box"></div>
+      </div>
+    </div>
+  </div>
 
   <!-- API KEY MODAL -->
   <div class="modal-overlay" id="api-modal">
@@ -976,9 +1170,18 @@ function addTerminalLog(text, cls, delay) {
 }
 
 function showScreen(id) {
-  ["input-screen","loading","report"].forEach(s => {
-    document.getElementById(s).style.display = s === id ? "block" : "none";
-  });
+  // Section MM: extended to manage both input/loading/report (App QA), the
+  // code-screen / code-report (Code Review), and monitor-screen (Monitor).
+  // A screen not in this list silently no-ops on display change.
+  const screens = [
+    "input-screen", "loading", "report",
+    "code-screen", "code-report",
+    "monitor-screen"
+  ];
+  for (const s of screens) {
+    const el = document.getElementById(s);
+    if (el) el.style.display = (s === id ? "block" : "none");
+  }
 }
 
 function resetApp() {
@@ -2342,7 +2545,7 @@ function _renderApiKeyFingerprint() {
 // BUILD_VERSION is updated by the deploy script (or hand-bumped) on each release.
 // Renders in the footer for bug reports — gives reviewers a way to tell us "I saw
 // X behavior on build Y" instead of a vague timeline reference.
-const QUALMLY_BUILD = { version: "v1.3.0", date: "2026-05-02", channel: "stable" };
+const QUALMLY_BUILD = { version: "v1.4.0", date: "2026-05-03", channel: "stable" };
 
 // ── Section S: Anthropic API retry + offline guard ─────────────────────────
 // Wrap a fetch in: (1) navigator.onLine check before send, (2) one automatic
@@ -2761,7 +2964,7 @@ function toggleApiKeyVis() {
 // ═════════════════════════════════════════════════════════════════════════════
 // SCREEN / MODE MANAGEMENT (extends the original showScreen to cover code screens)
 // ═════════════════════════════════════════════════════════════════════════════
-const ALL_SCREENS = ["input-screen","code-screen","loading","report","code-report"];
+const ALL_SCREENS = ["input-screen","code-screen","loading","report","code-report","monitor-screen"];
 showScreen = function(id) {
   ALL_SCREENS.forEach(s => {
     const el = document.getElementById(s);
@@ -2770,16 +2973,340 @@ showScreen = function(id) {
 };
 
 function switchMode(mode) {
-  const isCode = mode === "code";
-  ["tab-qa","mtab-qa"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.classList.toggle("active", !isCode);
-  });
-  ["tab-code","mtab-code"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.classList.toggle("active", isCode);
-  });
-  showScreen(isCode ? "code-screen" : "input-screen");
+  // Section MM: now 3 modes — qa | code | monitor.
+  const valid = new Set(["qa", "code", "monitor"]);
+  if (!valid.has(mode)) mode = "qa";
+  const tabIdMap = { qa: ["tab-qa","mtab-qa"], code: ["tab-code","mtab-code"], monitor: ["tab-monitor","mtab-monitor"] };
+  for (const m of valid) {
+    const isActive = m === mode;
+    for (const id of tabIdMap[m]) {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle("active", isActive);
+    }
+  }
+  if (mode === "code")    showScreen("code-screen");
+  else if (mode === "monitor") {
+    showScreen("monitor-screen");
+    // Each time the user lands on Monitor, refresh the sub-state from
+    // localStorage so a previously-registered user goes straight to dashboard.
+    if (typeof monitorRefreshDashboard === "function") monitorRefreshDashboard();
+  }
+  else showScreen("input-screen");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SECTION MM — MONITOR MODE (Pro tier, $99/yr continuous monitoring)
+// ─────────────────────────────────────────────────────────────────────────────
+// Endpoints (Cloudflare Worker at MONITOR_API_BASE):
+//   POST /api/checkout         { email } → { checkoutUrl }   (creates Stripe session)
+//   POST /api/register         { email, anthropicKeyEncrypted, passphrase }
+//                              → { userId }
+//   POST /api/watch            x-qualmly-user header
+//                              { targetUrl, intervalDays, builder, appType }
+//                              → { watchId }
+//   GET  /api/watch            x-qualmly-user header → { watches: [...] }
+//   GET  /api/watch/:id/results x-qualmly-user header → { latest, history }
+//   DELETE /api/watch/:id      x-qualmly-user header
+//
+// Storage on the client (localStorage, key = MONITOR_USER_KEY):
+//   { userId, email, registeredAt }
+// Anthropic key is NEVER stored client-side; it's encrypted in the browser
+// and sent to /api/register one time.
+// ═════════════════════════════════════════════════════════════════════════════
+const MONITOR_API_BASE = "https://monitor.qualmly.dev";
+const MONITOR_USER_KEY = "qualmly_monitor_user";
+
+// Pretend Stripe Checkout session creation lives at the Worker too. For the
+// MVP launch the user can configure either:
+//   (a) a direct Stripe Payment Link (`https://buy.stripe.com/…`) configured
+//       in the Worker, OR
+//   (b) a Worker endpoint /api/checkout that creates a session per-email.
+// The UI doesn't care which — it POSTs and uses whatever URL comes back.
+async function monitorSubscribe() {
+  const btn = document.getElementById("monitor-subscribe-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Opening Stripe…"; }
+  try {
+    const res = await fetch(MONITOR_API_BASE + "/api/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "qualmly.dev/#monitor" })
+    });
+    if (!res.ok) throw new Error("Checkout endpoint returned " + res.status);
+    const data = await res.json();
+    if (!data.checkoutUrl) throw new Error("No checkoutUrl in response");
+    // Stash a "pending checkout" flag so when the user comes back to the
+    // tab we know to show the onboard form instead of the pitch.
+    localStorage.setItem("qualmly_monitor_pending_checkout", "1");
+    window.location.href = data.checkoutUrl;
+  } catch (err) {
+    console.error("[monitor]", err);
+    if (btn) { btn.disabled = false; btn.textContent = "⚡ Subscribe — $99/yr"; }
+    alert("Couldn't open Stripe Checkout: " + (err.message || err) + "\n\nIf this persists, email hello@qualmly.dev — we'll onboard you manually.");
+  }
+}
+
+// "I already paid" link → skips straight to onboard form.
+function monitorShowOnboard() {
+  document.getElementById("monitor-pitch").style.display = "none";
+  document.getElementById("monitor-onboard").style.display = "block";
+  document.getElementById("monitor-dashboard").style.display = "none";
+  // Pre-fill email if we know one
+  try {
+    const cached = localStorage.getItem("qualmly_monitor_email");
+    if (cached) document.getElementById("mon-email").value = cached;
+  } catch(e) {}
+}
+
+// Pull saved user from localStorage
+function _monitorGetUser() {
+  try {
+    const raw = localStorage.getItem(MONITOR_USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch(e) { return null; }
+}
+
+function _monitorSetUser(user) {
+  if (user) localStorage.setItem(MONITOR_USER_KEY, JSON.stringify(user));
+  else localStorage.removeItem(MONITOR_USER_KEY);
+}
+
+// Decide which sub-state of the Monitor screen to show.
+async function monitorRefreshDashboard() {
+  const screen = document.getElementById("monitor-screen");
+  if (!screen || screen.style.display === "none") return;
+
+  const user = _monitorGetUser();
+  if (user && user.userId) {
+    // Already registered → show dashboard
+    document.getElementById("monitor-pitch").style.display = "none";
+    document.getElementById("monitor-onboard").style.display = "none";
+    document.getElementById("monitor-dashboard").style.display = "block";
+    await _monitorLoadWatches();
+    return;
+  }
+  // Not registered → check for ?checkout=success (Stripe redirect)
+  const params = new URLSearchParams(window.location.search);
+  const justPaid = params.get("checkout") === "success" ||
+                   localStorage.getItem("qualmly_monitor_pending_checkout") === "1";
+  if (justPaid) {
+    monitorShowOnboard();
+    // Pre-fill email if Stripe passed it back
+    const stripeEmail = params.get("email");
+    if (stripeEmail) document.getElementById("mon-email").value = stripeEmail;
+  } else {
+    document.getElementById("monitor-pitch").style.display = "block";
+    document.getElementById("monitor-onboard").style.display = "none";
+    document.getElementById("monitor-dashboard").style.display = "none";
+  }
+}
+
+// Register user + add the first watch in one go.
+async function monitorRegisterAndAddWatch() {
+  const errEl = document.getElementById("monitor-onboard-error");
+  errEl.style.display = "none";
+  const btn = document.getElementById("monitor-register-btn");
+
+  const email = document.getElementById("mon-email").value.trim();
+  const passphrase = document.getElementById("mon-passphrase").value;
+  const anthropicKey = document.getElementById("mon-anthropic-key").value.trim();
+  const watchUrl = document.getElementById("mon-watch-url").value.trim();
+  const builder = document.getElementById("mon-builder").value;
+  const intervalDays = parseInt(document.getElementById("mon-interval").value, 10) || 7;
+
+  // Light client-side validation. Final validation belongs server-side.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return _monitorError(errEl, "Enter a valid email.");
+  if (passphrase.length < 12) return _monitorError(errEl, "Passphrase must be at least 12 characters.");
+  if (!/^sk-ant-[A-Za-z0-9_-]{40,}/.test(anthropicKey)) return _monitorError(errEl, "That doesn't look like an Anthropic key (should start with sk-ant-).");
+  if (!/^https?:\/\//.test(watchUrl)) return _monitorError(errEl, "Watch URL must start with http:// or https://");
+
+  if (btn) { btn.disabled = true; btn.textContent = "Encrypting + registering…"; }
+
+  try {
+    // Encrypt the Anthropic key with the user's passphrase BEFORE leaving the
+    // browser. Same crypto as App QA mode (PBKDF2 300k + AES-GCM).
+    const encryptedKey = await _encryptApiKey(anthropicKey, passphrase);
+
+    const regRes = await fetch(MONITOR_API_BASE + "/api/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        anthropicKeyEncrypted: encryptedKey,
+        // Passphrase travels server-side ONCE so the worker can wrap it with
+        // SERVICE_PASSPHRASE_SALT (env secret) before storing. After this call
+        // the cron can decrypt without ever asking the user again.
+        passphrase
+      })
+    });
+    if (!regRes.ok) {
+      const t = await regRes.text();
+      throw new Error("Register failed: " + regRes.status + " " + t.slice(0, 200));
+    }
+    const regData = await regRes.json();
+    if (!regData.userId) throw new Error("Register response missing userId");
+
+    // Persist before adding the watch — if /api/watch fails we still want the
+    // user to be able to open the dashboard and try again.
+    _monitorSetUser({ userId: regData.userId, email, registeredAt: Date.now() });
+    try { localStorage.setItem("qualmly_monitor_email", email); } catch(e) {}
+    localStorage.removeItem("qualmly_monitor_pending_checkout");
+
+    // Add the first watch
+    const watchRes = await fetch(MONITOR_API_BASE + "/api/watch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-qualmly-user": regData.userId },
+      body: JSON.stringify({ targetUrl: watchUrl, intervalDays, builder, appType: "saas" })
+    });
+    if (!watchRes.ok) {
+      const t = await watchRes.text();
+      throw new Error("Couldn't add watch: " + watchRes.status + " " + t.slice(0, 200));
+    }
+
+    // Clear sensitive inputs once committed
+    document.getElementById("mon-passphrase").value = "";
+    document.getElementById("mon-anthropic-key").value = "";
+
+    showToast("✓ Monitoring active — first scan within 1 hour");
+    await monitorRefreshDashboard();
+  } catch (err) {
+    console.error("[monitor]", err);
+    _monitorError(errEl, err.message || String(err));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "⚡ Activate monitoring"; }
+  }
+}
+
+function _monitorError(el, msg) {
+  el.textContent = msg;
+  el.style.display = "block";
+}
+
+// Fetch the user's watches and render them.
+async function _monitorLoadWatches() {
+  const user = _monitorGetUser();
+  const list = document.getElementById("monitor-watches-list");
+  if (!user || !list) return;
+  // textContent on the loading state — no HTML injection risk
+  list.textContent = "Loading watches…";
+  try {
+    const res = await fetch(MONITOR_API_BASE + "/api/watch", {
+      method: "GET",
+      headers: { "x-qualmly-user": user.userId }
+    });
+    if (res.status === 401 || res.status === 404) {
+      // The server forgot us — sign out client-side too.
+      _monitorSetUser(null);
+      await monitorRefreshDashboard();
+      return;
+    }
+    if (!res.ok) throw new Error("List failed: " + res.status);
+    const data = await res.json();
+    _renderWatches(list, data.watches || []);
+  } catch (err) {
+    console.error("[monitor]", err);
+    list.textContent = "";
+    const div = document.createElement("div");
+    div.className = "error-box";
+    div.style.display = "block";
+    div.textContent = "Couldn't load watches: " + (err.message || err);
+    list.appendChild(div);
+  }
+}
+
+function _renderWatches(container, watches) {
+  // AUDITED-SAFE: builds DOM nodes; all user-controlled fields go through
+  // textContent or attribute setters. No innerHTML for user data.
+  container.textContent = "";
+  if (watches.length === 0) {
+    const empty = document.createElement("div");
+    empty.style.cssText = "font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:14px;border:1px dashed var(--border);border-radius:var(--radius-sm);text-align:center";
+    empty.textContent = "No watches yet. Click “+ Add watch” above.";
+    container.appendChild(empty);
+    return;
+  }
+  for (const w of watches) {
+    const card = document.createElement("div");
+    card.style.cssText = "border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap";
+    const left = document.createElement("div");
+    left.style.cssText = "flex:1;min-width:200px;display:flex;flex-direction:column;gap:4px";
+    const url = document.createElement("div");
+    url.style.cssText = "font-family:'DM Mono',monospace;font-size:13px;color:var(--text);font-weight:700;word-break:break-all";
+    url.textContent = w.targetUrl || "(no URL)";
+    const meta = document.createElement("div");
+    meta.style.cssText = "font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)";
+    const lastScan = w.lastScanAt ? new Date(w.lastScanAt).toLocaleString() : "never";
+    meta.textContent = (w.builder || "unknown") + " · every " + (w.intervalDays || 7) + "d · last scan: " + lastScan + (w.paused ? " · paused" : "");
+    left.appendChild(url); left.appendChild(meta);
+    const del = document.createElement("button");
+    del.className = "reset-btn";
+    del.style.cssText = "color:var(--fail);border-color:rgba(255,77,109,0.25)";
+    del.textContent = "Remove";
+    del.addEventListener("click", () => monitorDeleteWatch(w.id, w.targetUrl));
+    card.appendChild(left); card.appendChild(del);
+    container.appendChild(card);
+  }
+}
+
+async function monitorDeleteWatch(watchId, label) {
+  if (!confirm("Stop monitoring " + (label || "this watch") + "?")) return;
+  const user = _monitorGetUser();
+  if (!user) return;
+  try {
+    const res = await fetch(MONITOR_API_BASE + "/api/watch/" + encodeURIComponent(watchId), {
+      method: "DELETE",
+      headers: { "x-qualmly-user": user.userId }
+    });
+    if (!res.ok) throw new Error("Delete failed: " + res.status);
+    showToast("✓ Watch removed");
+    await _monitorLoadWatches();
+  } catch (err) {
+    alert("Couldn't remove: " + (err.message || err));
+  }
+}
+
+function monitorShowAddWatchForm() {
+  document.getElementById("monitor-add-watch-card").style.display = "block";
+  document.getElementById("mon-add-url").focus();
+}
+function monitorHideAddWatchForm() {
+  document.getElementById("monitor-add-watch-card").style.display = "none";
+  document.getElementById("mon-add-url").value = "";
+  document.getElementById("monitor-add-watch-error").style.display = "none";
+}
+
+async function monitorAddWatch() {
+  const errEl = document.getElementById("monitor-add-watch-error");
+  errEl.style.display = "none";
+  const user = _monitorGetUser();
+  if (!user) return _monitorError(errEl, "Not signed in to Monitor.");
+
+  const targetUrl = document.getElementById("mon-add-url").value.trim();
+  const builder   = document.getElementById("mon-add-builder").value;
+  const intervalDays = parseInt(document.getElementById("mon-add-interval").value, 10) || 7;
+  if (!/^https?:\/\//.test(targetUrl)) return _monitorError(errEl, "URL must start with http:// or https://");
+
+  try {
+    const res = await fetch(MONITOR_API_BASE + "/api/watch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-qualmly-user": user.userId },
+      body: JSON.stringify({ targetUrl, intervalDays, builder, appType: "saas" })
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error("Add failed: " + res.status + " " + t.slice(0, 200));
+    }
+    monitorHideAddWatchForm();
+    showToast("✓ Watch added");
+    await _monitorLoadWatches();
+  } catch (err) {
+    _monitorError(errEl, err.message || String(err));
+  }
+}
+
+function monitorSignOut() {
+  if (!confirm("Sign out of Monitor on this device?\n\nYour subscription stays active. You can sign back in by entering your email + passphrase later (re-register flow).")) return;
+  _monitorSetUser(null);
+  monitorRefreshDashboard();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -4006,6 +4533,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const incomingMode = params.get("mode");
     if (incomingMode === "code" && typeof switchMode === "function") {
       switchMode("code");
+    }
+    // Section MM: deep-link to Monitor mode (used by Stripe redirect_url and
+    // by direct marketing URLs like qualmly.dev/?mode=monitor).
+    if (incomingMode === "monitor" && typeof switchMode === "function") {
+      switchMode("monitor");
     }
     if (incomingUrl) {
       const urlInput = document.getElementById("url");

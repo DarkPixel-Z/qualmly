@@ -75,6 +75,20 @@ For SERVICE_PASSPHRASE_SALT, generate via:
 openssl rand -hex 16
 ```
 
+**Plus one of these two checkout configurations** (the qualmly.dev "Subscribe" button calls `/api/checkout` and uses whichever you set):
+
+```bash
+# Option A — Stripe Payment Link (simplest, recommended for launch)
+# Create one at https://dashboard.stripe.com/payment-links pointing at the $99/yr price
+wrangler secret put STRIPE_PAYMENT_LINK
+# value looks like: https://buy.stripe.com/eVa3eu...
+
+# OR Option B — full Checkout Session API (gives more control)
+# (STRIPE_SECRET_KEY is already set above)
+wrangler secret put STRIPE_PRICE_ID
+# value looks like: price_1S...
+```
+
 ---
 
 ## Step 4 — set up Stripe products + webhook

@@ -51,6 +51,11 @@ export default {
         return handleRegister(request, env);
       }
 
+      // ── Stripe Checkout Session creation (browser → here → Stripe) ─────────
+      if (path === '/api/checkout' && method === 'POST') {
+        return handleCheckout(request, env);
+      }
+
       // ── Watch target CRUD ──────────────────────────────────────────────────
       if (path === '/api/watch' && method === 'POST') {
         return handleAddWatch(request, env);
@@ -140,13 +145,27 @@ async function runScanForWatch(watch, env) {
     throw new Error('user has no encrypted Anthropic key');
   }
   // For an automated cron scan we can't ask the user for their passphrase.
-  // The Pro tier uses a secondary "service-mode" passphrase that the user
-  // provides at registration; it's stored encrypted with KMS. (See deploy
-  // README for the KMS setup — for the scaffold we read it from a per-user
-  // service KV value.)
-  const servicePassphrase = await env.USERS.get(`svc:${watch.userId}`);
-  if (!servicePassphrase) {
+  // At registration we wrapped their passphrase with SERVICE_PASSPHRASE_SALT
+  // (Worker secret) and stored it at svc:<userId>. Unwrap it now, then use
+  // it to decrypt the Anthropic key blob the user encrypted in their browser.
+  // Net effect: an attacker needs BOTH a KV breach AND the Worker secret to
+  // recover any user's Anthropic key.
+  if (!env.SERVICE_PASSPHRASE_SALT) {
+    throw new Error('SERVICE_PASSPHRASE_SALT secret missing — set it via `wrangler secret put`');
+  }
+  const wrappedJson = await env.USERS.get(`svc:${watch.userId}`);
+  if (!wrappedJson) {
     throw new Error('service passphrase not configured — user needs to enable continuous monitoring');
+  }
+  // Backwards-compatible: old records may have stored the passphrase in
+  // plaintext under svc:<userId>. If JSON.parse fails, fall through and
+  // treat the value as the literal passphrase.
+  let servicePassphrase;
+  try {
+    const wrapped = JSON.parse(wrappedJson);
+    servicePassphrase = await decryptKey(wrapped, env.SERVICE_PASSPHRASE_SALT);
+  } catch (e) {
+    servicePassphrase = wrappedJson;
   }
   const anthropicKey = await decryptKey(user.encryptedKey, servicePassphrase);
 
@@ -413,24 +432,95 @@ async function decryptKey(blob, passphrase) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 async function handleRegister(request, env) {
+  // The browser does the heavy work: PBKDF2 + AES-GCM the Anthropic key with
+  // the user's passphrase, then POSTs both pieces here. We:
+  //   1. Save the already-encrypted blob into USERS KV
+  //   2. Wrap the passphrase with SERVICE_PASSPHRASE_SALT (Worker secret) and
+  //      save at svc:<userId>. This dual-key model means a KV breach alone
+  //      cannot decrypt the Anthropic key — an attacker would also need the
+  //      Worker secret. Conversely, a Worker secret leak alone is useless
+  //      without the encrypted KV blob.
+  //
+  // Backwards compatible with the old { anthropicKey } shape — if the client
+  // sends a plaintext key we encrypt server-side. New clients should send
+  // anthropicKeyEncrypted (the AES-GCM blob from _encryptApiKey).
   const body = await request.json();
-  const { email, anthropicKey, passphrase } = body;
-  if (!email || !anthropicKey || !passphrase) return json({ error: 'missing fields' }, 400);
+  const { email, anthropicKey, anthropicKeyEncrypted, passphrase } = body;
+  if (!email || !passphrase) return json({ error: 'missing fields (email, passphrase)' }, 400);
+  if (!anthropicKey && !anthropicKeyEncrypted) {
+    return json({ error: 'missing fields (anthropicKey or anthropicKeyEncrypted)' }, 400);
+  }
+  if (!env.SERVICE_PASSPHRASE_SALT) {
+    return json({ error: 'server misconfigured: SERVICE_PASSPHRASE_SALT not set' }, 500);
+  }
 
-  // Encrypt the Anthropic key with a passphrase-derived AES-GCM key (mirrors
-  // qualmly.dev's _encryptApiKey; see index.html lines ~1846–1860).
-  const encrypted = await encryptKey(anthropicKey, passphrase);
+  // Persist the encrypted Anthropic-key blob. Either we got it pre-encrypted
+  // from the browser (preferred) or we encrypt here.
+  const encryptedKey = anthropicKeyEncrypted || await encryptKey(anthropicKey, passphrase);
   const userId = crypto.randomUUID();
 
   await env.USERS.put(`user:${userId}`, JSON.stringify({
     id: userId,
     email,
-    encryptedKey: encrypted,
+    encryptedKey,
     createdAt: Date.now(),
     subscriptionActive: false // becomes true on Stripe webhook
   }));
 
+  // Wrap the passphrase with the Worker secret. The cron reads svc:<userId>,
+  // unwraps the passphrase, then uses it to decrypt the Anthropic key.
+  const wrappedPassphrase = await encryptKey(passphrase, env.SERVICE_PASSPHRASE_SALT);
+  await env.USERS.put(`svc:${userId}`, JSON.stringify(wrappedPassphrase));
+
   return json({ userId });
+}
+
+/**
+ * /api/checkout — create a Stripe Checkout Session for the Pro tier.
+ * Returns { checkoutUrl }. The browser redirects there.
+ *
+ * Two configurations supported:
+ *   1. STRIPE_PAYMENT_LINK env var = a static `https://buy.stripe.com/…` URL.
+ *      Returns it verbatim. Simplest setup; no Stripe API call.
+ *   2. STRIPE_SECRET_KEY + STRIPE_PRICE_ID env vars present → create a Session
+ *      via the Stripe API with success/cancel URLs back to qualmly.dev.
+ *
+ * Pick whichever you've configured. Payment Link is the launch-day default
+ * because it avoids a Stripe SDK dependency in the Worker.
+ */
+async function handleCheckout(request, env) {
+  if (env.STRIPE_PAYMENT_LINK) {
+    return json({ checkoutUrl: env.STRIPE_PAYMENT_LINK });
+  }
+  if (!env.STRIPE_SECRET_KEY || !env.STRIPE_PRICE_ID) {
+    return json({
+      error: 'checkout not configured — set STRIPE_PAYMENT_LINK or STRIPE_SECRET_KEY + STRIPE_PRICE_ID'
+    }, 503);
+  }
+
+  // Stripe Checkout Session creation via form-encoded API (no SDK needed).
+  const params = new URLSearchParams();
+  params.set('mode', 'subscription');
+  params.set('line_items[0][price]', env.STRIPE_PRICE_ID);
+  params.set('line_items[0][quantity]', '1');
+  params.set('success_url', 'https://qualmly.dev/?mode=monitor&checkout=success');
+  params.set('cancel_url',  'https://qualmly.dev/?mode=monitor&checkout=cancel');
+  params.set('allow_promotion_codes', 'true');
+
+  const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + env.STRIPE_SECRET_KEY,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: params.toString()
+  });
+  if (!stripeRes.ok) {
+    const t = await stripeRes.text();
+    return json({ error: 'stripe checkout creation failed', detail: t.slice(0, 400) }, 502);
+  }
+  const session = await stripeRes.json();
+  return json({ checkoutUrl: session.url });
 }
 
 async function handleAddWatch(request, env) {
