@@ -2,11 +2,12 @@
 
 > AI reviewer that raises every concern about code shipped from Lovable, Bolt, v0, Cursor, and Copilot. Get a real audit in 30 seconds — no engineer required.
 
-![Qualmly](https://img.shields.io/badge/v1-C9FF47?style=flat-square&labelColor=0C0C10)
+![Qualmly](https://img.shields.io/badge/v1.3-C9FF47?style=flat-square&labelColor=0C0C10)
 ![License](https://img.shields.io/badge/license-MIT-3DFFA0?style=flat-square&labelColor=0C0C10)
 ![Built with Claude](https://img.shields.io/badge/built%20with-Claude%20API-5B8DEF?style=flat-square&labelColor=0C0C10)
+[![GitHub Marketplace](https://img.shields.io/badge/GitHub_Marketplace-Qualmly_Audit-2DA44E?style=flat-square&labelColor=0C0C10&logo=github)](https://github.com/marketplace/actions/qualmly-audit)
 
-**[Try it now → qualmly.dev](https://qualmly.dev)**
+**[Try it now → qualmly.dev](https://qualmly.dev)** &middot; **[Add to your repo → GitHub Marketplace](https://github.com/marketplace/actions/qualmly-audit)**
 
 ---
 
