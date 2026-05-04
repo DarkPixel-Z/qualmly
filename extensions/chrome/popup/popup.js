@@ -30,8 +30,10 @@ const QUALMLY_BASE = 'https://qualmly.dev';
   const url = activeTab.url;
   urlDisplay.textContent = url;
 
-  // Block useless URLs
-  if (/^chrome:|^chrome-extension:|^edge:|^about:|^file:|^data:/i.test(url)) {
+  // Block useless or dangerous URLs. javascript:/vbscript: are defense-in-depth
+  // — qualmly.dev validates ?url= server-side and won't follow them, but if
+  // that ever changes, we don't want the extension to be the entry point.
+  if (/^chrome:|^chrome-extension:|^edge:|^about:|^file:|^data:|^javascript:|^vbscript:|^view-source:/i.test(url)) {
     urlDisplay.style.color = 'var(--warn)';
     auditBtn.disabled = true;
     auditBtn.style.opacity = '0.5';

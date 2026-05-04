@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qualmly-mobile"
-version = "1.0.0"
+version = "1.0.1"
 description = "APK/IPA secret + endpoint scanner for vibe-coded mobile apps. Companion to Qualmly (qualmly.dev)."
 readme = "README.md"
 requires-python = ">=3.8"

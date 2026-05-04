@@ -37,7 +37,7 @@ import zipfile
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # Same 9 secret-detection patterns the qualmly.dev Code Review uses.
 # Keep in sync with index.html SECRET_PATTERNS.
@@ -51,7 +51,10 @@ SECRET_PATTERNS: List[Tuple[str, str]] = [
     ("GitHub classic token",         r"ghp_[A-Za-z0-9]{30,}"),
     ("Slack bot token",              r"xoxb-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{20,}"),
     ("Google API key",               r"AIzaSy[A-Za-z0-9_-]{33}"),
-    ("Supabase service-role JWT",    r"eyJ[A-Za-z0-9_-]{30,}\.eyJ[A-Za-z0-9_-]{60,}\.[A-Za-z0-9_-]{20,}"),
+    # ReDoS-safe: every group is upper-bounded so a pathological input can't
+    # cause catastrophic backtracking on minified bundles. Real Supabase JWTs
+    # fit comfortably inside these limits.
+    ("Supabase service-role JWT",    r"\beyJ[A-Za-z0-9_-]{30,500}\.eyJ[A-Za-z0-9_-]{60,2000}\.[A-Za-z0-9_-]{20,200}\b"),
 ]
 
 # Endpoint / config patterns
@@ -71,7 +74,8 @@ SCANNABLE_EXTENSIONS = {
 SKIP_PATHS = re.compile(
     r"(^|/)(META-INF|res/raw|assets/fonts|node_modules|\.git)/", re.IGNORECASE
 )
-MAX_FILE_BYTES = 5 * 1024 * 1024  # skip files > 5 MB
+MAX_FILE_BYTES = 5 * 1024 * 1024  # skip files > 5 MB (per-entry hard cap)
+MAX_TOTAL_DECOMPRESSED = 500 * 1024 * 1024  # 500 MB total bytes-decompressed across the archive
 
 
 def detect_format(path: Path) -> str:
@@ -107,12 +111,31 @@ def scan_file_bytes(name: str, raw: bytes) -> List[Dict]:
     for kind, pattern in SECRET_PATTERNS:
         for m in re.finditer(pattern, text):
             sample = m.group(0)
+            # is_live: detects production-tier credentials. The Stripe regex
+            # captures both `sk_live_` and `sk_test_` under the same kind
+            # name, so we MUST inspect the matched value, not the kind label.
+            # Earlier the kind-label substring check could never fire (the
+            # word "live" never appeared in any kind label) which made the
+            # exit-code-1-on-live-key CI gate completely non-functional.
+            sample_lower = sample.lower()
+            is_live = (
+                "_live_" in sample_lower
+                or "sk-ant-" in sample_lower      # Anthropic keys are always live
+                or "akia" in sample_lower         # AWS access keys are always live
+                or sample.startswith("ghp_")      # GitHub PAT
+                or sample.startswith("github_pat_")
+                or sample.startswith("xoxb-")     # Slack bot
+                or sample.startswith("AIzaSy")    # Google API
+                or sample.startswith("eyJ")       # Supabase JWT
+                or kind.lower().startswith("openai")  # all OpenAI keys are production
+            )
             findings.append({
                 "category": "secret",
                 "kind": kind,
                 "file": name,
                 "sample": sample[:12] + ("…" if len(sample) > 12 else ""),
                 "length": len(sample),
+                "is_live": is_live,
             })
     for kind, pattern in ENDPOINT_PATTERNS:
         for m in re.finditer(pattern, text):
@@ -135,12 +158,17 @@ def scan_archive(archive_path: Path) -> Dict:
     file_count = 0
     skipped_too_large = 0
     skipped_binary = 0
+    skipped_zip_bomb = 0
     scanned_files = 0
+    total_decompressed = 0
 
     with zipfile.ZipFile(archive_path) as z:
         for info in z.infolist():
             file_count += 1
             name = info.filename
+            # Sanitize filename for any later printing — strip ANSI/control
+            # chars so a malicious archive can't pollute the terminal.
+            safe_name = re.sub(r"[\x00-\x1f\x7f-\x9f]", "?", name)
             if SKIP_PATHS.search("/" + name):
                 continue
             ext = os.path.splitext(name)[1].lower()
@@ -148,25 +176,47 @@ def scan_archive(archive_path: Path) -> Dict:
             if ext not in SCANNABLE_EXTENSIONS and not re.search(r"(?:config|env|settings|api|key)", name, re.I):
                 skipped_binary += 1
                 continue
+            # info.file_size is the ZIP's CLAIMED uncompressed size and is
+            # attacker-controlled. A zip bomb declares a small file_size but
+            # decompresses to hundreds of MB. We trust nothing — read with a
+            # cap and verify what actually came out.
             if info.file_size > MAX_FILE_BYTES:
                 skipped_too_large += 1
                 continue
+            # Bail early if we've already decompressed close to the global cap.
+            if total_decompressed >= MAX_TOTAL_DECOMPRESSED:
+                skipped_zip_bomb += 1
+                continue
             try:
                 with z.open(info) as f:
-                    raw = f.read()
-                file_findings = scan_file_bytes(name, raw)
+                    # Read at most MAX_FILE_BYTES + 1 — if we get the +1 byte,
+                    # the entry lied about its size and we treat it as a bomb.
+                    raw = f.read(MAX_FILE_BYTES + 1)
+                if len(raw) > MAX_FILE_BYTES:
+                    skipped_zip_bomb += 1
+                    continue
+                total_decompressed += len(raw)
+                if total_decompressed > MAX_TOTAL_DECOMPRESSED:
+                    skipped_zip_bomb += 1
+                    continue
+                file_findings = scan_file_bytes(safe_name, raw)
                 findings.extend(file_findings)
                 scanned_files += 1
             except Exception as e:
                 # zip corruption or unreadable entry — keep going
                 continue
 
-    # Severity classification
+    # Severity classification — keys "live" status is recorded on each finding
+    # at scan time (see scan_file_bytes), NOT inferred from the kind name.
+    # A Stripe `sk_test_…` and `sk_live_…` share the same kind label
+    # ("Stripe secret key") so the only reliable signal is the matched value.
     n_secrets = sum(1 for f in findings if f["category"] == "secret")
     n_endpoints = sum(1 for f in findings if f["category"] == "endpoint")
+    n_live = sum(1 for f in findings if f["category"] == "secret" and f.get("is_live"))
+    n_nonlive = n_secrets - n_live
     score = 100
-    score -= 15 * sum(1 for f in findings if f["category"] == "secret" and "live" in f["kind"].lower())
-    score -= 8 * sum(1 for f in findings if f["category"] == "secret" and "live" not in f["kind"].lower())
+    score -= 15 * n_live
+    score -= 8 * n_nonlive
     score -= 3 * n_endpoints
     score = max(0, min(100, score))
 
@@ -178,55 +228,81 @@ def scan_archive(archive_path: Path) -> Dict:
         "files_scanned": scanned_files,
         "files_skipped_binary": skipped_binary,
         "files_skipped_too_large": skipped_too_large,
+        "files_skipped_zip_bomb": skipped_zip_bomb,
         "score": score,
         "findings_count": len(findings),
         "secrets_count": n_secrets,
+        "live_secrets_count": n_live,
         "endpoints_count": n_endpoints,
         "findings": findings,
     }
 
 
 def render_human(report: Dict) -> str:
-    """Pretty-print a report for the terminal."""
+    """Pretty-print a report for the terminal.
+
+    Emoji are wrapped via _glyph() so a Windows cp1252 console doesn't crash
+    with UnicodeEncodeError. We auto-detect the stdout encoding and fall
+    back to plain ASCII labels when we can't safely emit Unicode.
+    """
+    use_unicode = _can_print_unicode()
+
+    def g(emoji: str, fallback: str) -> str:
+        return emoji if use_unicode else fallback
+
     if "error" in report:
-        return f"\n  ❌ {report['error']}\n"
+        return f"\n  {g('❌', '[ERROR]')} {report['error']}\n"
 
     lines = []
     lines.append("")
-    lines.append(f"  🔍 Qualmly Mobile Scan — {report['archive']}")
-    lines.append(f"  ─────────────────────────────────────────────────")
+    lines.append(f"  {g('🔍', '##')} Qualmly Mobile Scan {g('—', '--')} {report['archive']}")
+    lines.append(f"  {g('─' * 50, '-' * 50)}")
     lines.append(f"  Format:           {report['format'].upper()}")
     lines.append(f"  Size:             {report['size_bytes'] / (1024*1024):.1f} MB")
     lines.append(f"  Files scanned:    {report['files_scanned']} / {report['files_in_archive']}")
     score = report["score"]
     bar_filled = max(0, min(10, round(score / 10)))
-    bar = "█" * bar_filled + "░" * (10 - bar_filled)
+    bar_full, bar_empty = ("█", "░") if use_unicode else ("#", ".")
+    bar = bar_full * bar_filled + bar_empty * (10 - bar_filled)
     lines.append(f"  Score:            {score}/100  {bar}")
-    lines.append(f"  Secrets found:    {report['secrets_count']}")
+    lines.append(f"  Secrets found:    {report['secrets_count']} ({report.get('live_secrets_count', 0)} live)")
     lines.append(f"  Endpoints found:  {report['endpoints_count']}")
     lines.append("")
 
     if report["secrets_count"]:
-        lines.append("  🔴 SECRETS:")
+        lines.append(f"  {g('🔴', '[!]')} SECRETS:")
         for f in report["findings"]:
             if f["category"] != "secret":
                 continue
-            lines.append(f"     • {f['kind']:30}  in  {f['file']}")
+            tag = " [LIVE]" if f.get("is_live") else ""
+            bullet = g("•", "*")
+            lines.append(f"     {bullet} {f['kind']:30}  in  {f['file']}{tag}")
             lines.append(f"       sample: {f['sample']} ({f['length']} chars total)")
         lines.append("")
 
     if report["endpoints_count"]:
-        lines.append("  🔵 ENDPOINTS:")
+        lines.append(f"  {g('🔵', '[i]')} ENDPOINTS:")
         for f in report["findings"]:
             if f["category"] != "endpoint":
                 continue
-            lines.append(f"     • {f['kind']:30}  →  {f.get('value', '')}")
+            arrow = g("→", "->")
+            bullet = g("•", "*")
+            lines.append(f"     {bullet} {f['kind']:30}  {arrow}  {f.get('value', '')}")
             lines.append(f"       in {f['file']}")
         lines.append("")
 
-    lines.append("  Powered by Qualmly · qualmly.dev")
+    lines.append(f"  Powered by Qualmly {g('·', '|')} qualmly.dev")
     lines.append("")
     return "\n".join(lines)
+
+
+def _can_print_unicode() -> bool:
+    """True if stdout can safely emit emoji / box-drawing chars."""
+    enc = (getattr(sys.stdout, "encoding", None) or "").lower()
+    # cp1252 (Windows default), ascii, latin-1 etc. all crash on emoji.
+    if not enc or "utf" not in enc:
+        return False
+    return True
 
 
 def main():
@@ -254,9 +330,14 @@ def main():
     else:
         print(render_human(report))
 
-    # Exit code 1 if any live-keyed secret found
+    # Exit code 1 if any live (production) secret was found.
+    # The is_live flag is set per-finding at scan time based on the matched
+    # value — we cannot rely on the kind label (e.g. "Stripe secret key"
+    # never contains the substring "live"). This is the entire CI-gating
+    # value of the tool, so the bug to keep guarding against is "exit 0
+    # despite an obvious live key."
     has_critical = any(
-        f["category"] == "secret" and "live" in f.get("kind", "").lower()
+        f.get("category") == "secret" and f.get("is_live")
         for f in report.get("findings", [])
     )
     sys.exit(1 if has_critical else 0)

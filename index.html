@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="description" content="Qualmly raises every concern about code shipped from Lovable, Bolt, v0, Cursor, and Copilot. One HTML file, your Claude key, honest answers. Ship with no qualms.">
 <meta name="theme-color" content="#D4FF4F">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.anthropic.com https://api.allorigins.win https://api.codetabs.com https://corsproxy.io https://archive.org; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.anthropic.com https://api.allorigins.win https://api.codetabs.com https://corsproxy.io https://archive.org https://monitor.qualmly.dev; frame-ancestors 'none'; base-uri 'self'; form-action 'none';">
 <meta http-equiv="X-Content-Type-Options" content="nosniff">
 <meta name="referrer" content="strict-origin-when-cross-origin">
 <!-- Section Q: deny every browser API the app doesn't use. Defence in depth — even if
@@ -2545,7 +2545,7 @@ function _renderApiKeyFingerprint() {
 // BUILD_VERSION is updated by the deploy script (or hand-bumped) on each release.
 // Renders in the footer for bug reports — gives reviewers a way to tell us "I saw
 // X behavior on build Y" instead of a vague timeline reference.
-const QUALMLY_BUILD = { version: "v1.4.0", date: "2026-05-03", channel: "stable" };
+const QUALMLY_BUILD = { version: "v1.4.1", date: "2026-05-04", channel: "stable" };
 
 // ── Section S: Anthropic API retry + offline guard ─────────────────────────
 // Wrap a fetch in: (1) navigator.onLine check before send, (2) one automatic
@@ -2665,7 +2665,11 @@ function clearAllAppData() {
     "vc_prefs",
     "vc_last_key_use",
     "qualmly_history",
-    "qualmly_prefs"
+    "qualmly_prefs",
+    // Section MM: Monitor mode keys
+    "qualmly_monitor_user",
+    "qualmly_monitor_email",
+    "qualmly_monitor_pending_checkout"
   ];
   keys.forEach(k => {
     try { localStorage.removeItem(k); } catch(e) {}
@@ -3026,10 +3030,20 @@ async function monitorSubscribe() {
   const btn = document.getElementById("monitor-subscribe-btn");
   if (btn) { btn.disabled = true; btn.textContent = "Opening Stripe…"; }
   try {
+    // Pass through any userId we already have (returning visitor mid-flow)
+    // and the email if the user typed one earlier. The Worker stamps these
+    // as client_reference_id / customer_email on the Stripe Checkout
+    // Session so the webhook can resolve back to the right Qualmly user.
+    const existingUser = _monitorGetUser();
+    const cachedEmail = (function(){ try { return localStorage.getItem("qualmly_monitor_email") || ""; } catch(e) { return ""; } })();
     const res = await fetch(MONITOR_API_BASE + "/api/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "qualmly.dev/#monitor" })
+      body: JSON.stringify({
+        source: "qualmly.dev/#monitor",
+        userId: existingUser ? existingUser.userId : "",
+        email:  cachedEmail
+      })
     });
     if (!res.ok) throw new Error("Checkout endpoint returned " + res.status);
     const data = await res.json();
@@ -3151,28 +3165,62 @@ async function monitorRegisterAndAddWatch() {
     try { localStorage.setItem("qualmly_monitor_email", email); } catch(e) {}
     localStorage.removeItem("qualmly_monitor_pending_checkout");
 
-    // Add the first watch
-    const watchRes = await fetch(MONITOR_API_BASE + "/api/watch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-qualmly-user": regData.userId },
-      body: JSON.stringify({ targetUrl: watchUrl, intervalDays, builder, appType: "saas" })
-    });
-    if (!watchRes.ok) {
-      const t = await watchRes.text();
-      throw new Error("Couldn't add watch: " + watchRes.status + " " + t.slice(0, 200));
+    // Add the first watch. If THIS fails after registration succeeded, we
+    // do NOT throw — the user is already persisted, and forcing them to
+    // re-register would create a duplicate user record. Instead, fall through
+    // to the dashboard so they can use the "+ Add watch" form to retry.
+    let watchAddOk = true;
+    let watchAddErrText = "";
+    try {
+      const watchRes = await fetch(MONITOR_API_BASE + "/api/watch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-qualmly-user": regData.userId },
+        body: JSON.stringify({ targetUrl: watchUrl, intervalDays, builder, appType: "saas" })
+      });
+      if (!watchRes.ok) {
+        watchAddOk = false;
+        const t = await watchRes.text();
+        watchAddErrText = "Couldn't add watch: " + watchRes.status + " " + t.slice(0, 200);
+      }
+    } catch (we) {
+      watchAddOk = false;
+      watchAddErrText = "Couldn't add watch: " + (we.message || String(we));
     }
 
-    // Clear sensitive inputs once committed
-    document.getElementById("mon-passphrase").value = "";
-    document.getElementById("mon-anthropic-key").value = "";
-
-    showToast("✓ Monitoring active — first scan within 1 hour");
+    if (watchAddOk) {
+      showToast("✓ Monitoring active — first scan within 1 hour");
+    } else {
+      // Surface the partial-success state to the user so they can retry from
+      // the dashboard's "+ Add watch" form rather than re-registering.
+      showToast("✓ Account active — finish adding your watch below");
+    }
+    // Land on the dashboard regardless. The user is registered; the dashboard
+    // is now the right place for them to iterate.
     await monitorRefreshDashboard();
+    if (!watchAddOk) {
+      // After dashboard renders, surface the watch-add error inline.
+      const dashCard = document.getElementById("monitor-add-watch-error");
+      if (dashCard) {
+        dashCard.textContent = watchAddErrText;
+        dashCard.style.display = "block";
+        monitorShowAddWatchForm();
+        const urlInp = document.getElementById("mon-add-url");
+        if (urlInp) urlInp.value = watchUrl;
+      }
+    }
   } catch (err) {
     console.error("[monitor]", err);
     _monitorError(errEl, err.message || String(err));
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "⚡ Activate monitoring"; }
+    // Always clear sensitive fields after the call attempt — whether it
+    // succeeded, partially succeeded, or failed. Earlier behavior only cleared
+    // on full success, leaving keys/passphrases sitting in the DOM if /api/watch
+    // failed.
+    const passEl = document.getElementById("mon-passphrase");
+    const keyEl  = document.getElementById("mon-anthropic-key");
+    if (passEl) passEl.value = "";
+    if (keyEl)  keyEl.value = "";
   }
 }
 
@@ -3306,6 +3354,23 @@ async function monitorAddWatch() {
 function monitorSignOut() {
   if (!confirm("Sign out of Monitor on this device?\n\nYour subscription stays active. You can sign back in by entering your email + passphrase later (re-register flow).")) return;
   _monitorSetUser(null);
+  // Clear all Monitor-related state. Earlier this only cleared the user
+  // record, which left a stale "pending checkout" flag and cached email
+  // behind — sign-out appeared not to work because the next refresh
+  // dropped the user back into the onboard form.
+  try {
+    localStorage.removeItem("qualmly_monitor_email");
+    localStorage.removeItem("qualmly_monitor_pending_checkout");
+  } catch(e) { /* private mode / quota — ignore */ }
+  // Strip checkout query params so a refresh post-signout doesn't re-trigger
+  // the onboard form via the DOMContentLoaded deep-link handler.
+  try {
+    const u = new URL(window.location.href);
+    u.searchParams.delete("checkout");
+    u.searchParams.delete("session_id");
+    u.searchParams.delete("email");
+    history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
+  } catch(e) {}
   monitorRefreshDashboard();
 }
 
@@ -4534,9 +4599,15 @@ document.addEventListener("DOMContentLoaded", () => {
     if (incomingMode === "code" && typeof switchMode === "function") {
       switchMode("code");
     }
-    // Section MM: deep-link to Monitor mode (used by Stripe redirect_url and
-    // by direct marketing URLs like qualmly.dev/?mode=monitor).
-    if (incomingMode === "monitor" && typeof switchMode === "function") {
+    // Section MM: deep-link to Monitor mode. Triggered by:
+    //   • ?mode=monitor — direct marketing URLs
+    //   • ?checkout=success or ?checkout=cancel — Stripe redirect URLs (even
+    //     without explicit mode= param, because not every Stripe Payment Link
+    //     allows custom return URLs and we don't want users stranded on the
+    //     App QA tab after paying for Monitor).
+    const checkoutFlag = params.get("checkout");
+    if ((incomingMode === "monitor" || checkoutFlag === "success" || checkoutFlag === "cancel")
+        && typeof switchMode === "function") {
       switchMode("monitor");
     }
     if (incomingUrl) {

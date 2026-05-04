@@ -42,8 +42,10 @@ const requireInput = (name) => {
 const ANTHROPIC_API_KEY = requireInput('anthropic_api_key');
 const GITHUB_TOKEN = requireInput('github_token');
 const FAIL_ON = input('fail_on', 'critical').toLowerCase();
-const MAX_FILES = parseInt(input('max_files', '12'), 10);
-const MAX_KB = parseInt(input('max_kb_per_file', '60'), 10);
+// Clamp user inputs to safe upper bounds so a misconfigured workflow can't
+// blow the Anthropic context window or rack up cost. Defaults are unchanged.
+const MAX_FILES = Math.min(Math.max(parseInt(input('max_files', '12'), 10) || 12, 1), 50);
+const MAX_KB    = Math.min(Math.max(parseInt(input('max_kb_per_file', '60'), 10) || 60, 1), 200);
 const BUILDER = input('builder', 'cursor');
 const MODEL = input('model', 'claude-sonnet-4-6');
 const COMMENT_MODE = input('comment_mode', 'pr-comment');
@@ -113,12 +115,47 @@ async function getChangedFiles() {
 }
 
 // ── Fetch file contents from the head ref of the PR ─────────────────────────
+//
+// Use the authenticated GitHub Contents API (raw media type) instead of
+// raw.githubusercontent.com. This:
+//   1. Works on private repos (raw.githubusercontent.com doesn't honor bearer
+//      auth and silently 404s on private files).
+//   2. Lets us check Content-Length BEFORE downloading the body — a 100 MB
+//      file in a malicious PR no longer OOMs the runner.
+//   3. Refuses path-traversal filenames (`..` or absolute paths) which
+//      shouldn't ever come from `pulls/{n}/files` but we don't trust the
+//      input.
 async function fetchFileContent(file, ref) {
-  const url = `https://raw.githubusercontent.com/${OWNER}/${REPO}/${ref}/${file.filename}`;
-  const res = await fetch(url, {
-    headers: { 'Authorization': `Bearer ${GITHUB_TOKEN}`, 'User-Agent': 'qualmly-audit-action' }
-  });
+  const filename = file.filename || '';
+  if (filename.includes('..') || filename.startsWith('/') || filename.length > 1024) {
+    return { skipped: 'invalid filename' };
+  }
+  const url = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURI(filename)}?ref=${encodeURIComponent(ref)}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.raw',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'qualmly-audit-action'
+      }
+    });
+  } catch (e) {
+    return null;
+  }
   if (!res.ok) return null;
+
+  // Check Content-Length BEFORE reading the body. The Contents API sets a
+  // proper content-length header, so this avoids streaming a huge file into
+  // memory only to discard it.
+  const lenHeader = res.headers.get('content-length');
+  if (lenHeader) {
+    const len = parseInt(lenHeader, 10);
+    if (Number.isFinite(len) && len > MAX_KB * 1024) {
+      return { skipped: 'too large' };
+    }
+  }
   const buf = await res.arrayBuffer();
   if (buf.byteLength > MAX_KB * 1024) return { skipped: 'too large' };
   return new TextDecoder().decode(buf);
@@ -259,6 +296,11 @@ function fmtIssue(iss, idx) {
   ].filter(Boolean).join('\n');
 }
 
+// Unique marker we embed in every Qualmly comment so we can find OUR comments
+// on rebases without colliding with anyone else mentioning "Qualmly Audit"
+// in their own comment body.
+const QUALMLY_COMMENT_MARKER = '<!-- qualmly-audit:v1 -->';
+
 function fmtComment(report, costUsd, scannedFiles) {
   const issues = Array.isArray(report.issues) ? report.issues : [];
   const nFail = issues.filter(i => (i.severity || '').toLowerCase() === 'fail').length;
@@ -267,6 +309,7 @@ function fmtComment(report, costUsd, scannedFiles) {
   const score = typeof report.score === 'number' ? report.score : 0;
   const scoreEmoji = score >= 75 ? '🟢' : score >= 50 ? '🟡' : '🔴';
   return [
+    QUALMLY_COMMENT_MARKER,
     `## ${scoreEmoji} Qualmly Audit — ${score}/100`,
     '',
     `**${nFail}** critical · **${nWarn}** warnings · **${nInfo}** info — across **${scannedFiles}** files.`,
@@ -281,9 +324,18 @@ function fmtComment(report, costUsd, scannedFiles) {
 }
 
 // ── Find existing Qualmly comment to update (avoid spam on rebases) ────────
+//
+// Match on the embedded marker, AND require that the author is a Bot — both
+// are necessary because (1) the marker prevents matching on someone quoting
+// our comment in theirs, (2) the bot check prevents matching if a maintainer
+// pasted our comment text into their own.
 async function findExistingComment() {
   const comments = await gh(`/repos/${OWNER}/${REPO}/issues/${PR_NUMBER}/comments?per_page=100`);
-  return comments.find(c => c.body && c.body.startsWith('## ') && c.body.includes('Qualmly Audit'));
+  return comments.find(c =>
+    c.body &&
+    c.body.includes(QUALMLY_COMMENT_MARKER) &&
+    c.user && c.user.type === 'Bot'
+  );
 }
 
 async function postOrUpdateComment(body) {

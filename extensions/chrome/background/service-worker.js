@@ -10,7 +10,7 @@ chrome.commands.onCommand.addListener(async (command) => {
   if (command !== 'audit-current-tab') return;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url) return;
-  if (/^chrome:|^chrome-extension:|^edge:|^about:|^file:|^data:|^https?:\/\/(www\.)?qualmly\.dev/i.test(tab.url)) {
+  if (/^chrome:|^chrome-extension:|^edge:|^about:|^file:|^data:|^javascript:|^vbscript:|^view-source:|^https?:\/\/(www\.)?qualmly\.dev/i.test(tab.url)) {
     return;
   }
   const target = QUALMLY_BASE + '/?url=' + encodeURIComponent(tab.url) + '&utm_source=chrome_kbd';
@@ -31,7 +31,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   // Use the link URL if it's a link context, else the page URL
   const url = info.linkUrl || info.pageUrl || (tab && tab.url);
   if (!url) return;
-  if (/^chrome:|^chrome-extension:|^edge:|^about:|^file:|^data:|^https?:\/\/(www\.)?qualmly\.dev/i.test(url)) {
+  if (/^chrome:|^chrome-extension:|^edge:|^about:|^file:|^data:|^javascript:|^vbscript:|^view-source:|^https?:\/\/(www\.)?qualmly\.dev/i.test(url)) {
     return;
   }
   const target = QUALMLY_BASE + '/?url=' + encodeURIComponent(url) + '&utm_source=chrome_ctxmenu';

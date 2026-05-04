@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Qualmly — Audit this tab",
   "short_name": "Qualmly",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "One-click security + QA audit for the AI-built app you're currently looking at. Powered by qualmly.dev.",
   "homepage_url": "https://qualmly.dev",
   "icons": {
@@ -25,9 +25,7 @@
   },
   "permissions": [
     "activeTab",
-    "scripting",
-    "contextMenus",
-    "storage"
+    "contextMenus"
   ],
   "host_permissions": [
     "https://qualmly.dev/*"

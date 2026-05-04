@@ -12,12 +12,17 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Python build artifacts (mobile-scanner)
+# Python build artifacts — scoped to mobile-scanner only so we don't
+# accidentally ignore actions/audit/dist (the committed compiled GH Action).
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-build/
-dist/
-.eggs/
+mobile-scanner/build/
+mobile-scanner/dist/
+mobile-scanner/.eggs/
+
+# Worker test scripts — keep them in the repo (small, useful for re-verification)
+# but don't keep .wrangler local cache
+.wrangler/
 
