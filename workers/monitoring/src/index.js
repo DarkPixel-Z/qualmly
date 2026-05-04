@@ -150,9 +150,13 @@ async function runScheduledScans(env) {
   let skipped = 0;
   let failed = 0;
 
-  // Cap work per cron run to avoid wall-clock timeout. With weekly scans + the
-  // hourly cron cadence we'll catch up within a few hours of any backlog.
-  const MAX_PER_CRON = 50;
+  // Cap work per cron run to avoid wall-clock timeout AND subrequest cap.
+  // Each scan does ~12 subrequests (USERS.get×2, allorigins fetch, Anthropic
+  // ×1-3, HISTORY.get×2, Resend, HISTORY.put×2, WATCHES.put). The cron event
+  // ceiling is 1000 subrequests — 30 × 12 = 360, leaves headroom for retries
+  // and KV.list pagination. With weekly scans + hourly cron, a 30-cap fully
+  // catches up within a few hours of any backlog.
+  const MAX_PER_CRON = 30;
 
   // Sort by lastScanAt ascending (most-overdue first) so a partial run is fair.
   const candidates = [];
@@ -277,26 +281,38 @@ async function runScanForWatch(watch, env) {
     throw new Error('service passphrase not configured — user needs to enable continuous monitoring');
   }
   // Backwards-compatible: old records may have stored the passphrase in
-  // plaintext under svc:<userId>. If JSON.parse fails, fall through and
-  // treat the value as the literal passphrase.
-  let servicePassphrase;
+  // Unwrap the service-stored passphrase. The wrapped form is always the
+  // {v,salt,iv,ct} envelope; we no longer accept a plaintext fallback (the
+  // earlier comment described a "downgrade" path which would let an attacker
+  // with KV write access overwrite svc:<id> with a known plaintext and
+  // weaken the dual-key model). All real records are wrapped.
+  let wrapped;
   try {
-    const wrapped = JSON.parse(wrappedJson);
-    servicePassphrase = await decryptKey(wrapped, env.SERVICE_PASSPHRASE_SALT);
+    wrapped = JSON.parse(wrappedJson);
   } catch (e) {
-    servicePassphrase = wrappedJson;
+    throw new Error('service passphrase blob malformed for ' + watch.userId);
   }
+  if (!wrapped || typeof wrapped !== 'object' || !Array.isArray(wrapped.salt) || !Array.isArray(wrapped.iv) || !Array.isArray(wrapped.ct)) {
+    throw new Error('service passphrase blob shape invalid for ' + watch.userId);
+  }
+  const servicePassphrase = await decryptKey(wrapped, env.SERVICE_PASSPHRASE_SALT);
   const anthropicKey = await decryptKey(user.encryptedKey, servicePassphrase);
 
-  // Fetch the page via allorigins (same as qualmly.dev's main proxy)
+  // Fetch the page via allorigins (same as qualmly.dev's main proxy). If the
+  // crawl fails (allorigins down, target offline, network error), we MUST
+  // throw — scanning empty HTML produces garbage findings AND consumes the
+  // user's Anthropic credit. Better to skip this scan and retry next cron.
   const pageRes = await fetch(
     `https://api.allorigins.win/get?url=${encodeURIComponent(watch.targetUrl)}`,
     { signal: AbortSignal.timeout(15000) }
   );
-  let pageHtml = '';
-  if (pageRes.ok) {
-    const wrapped = await pageRes.json();
-    pageHtml = (wrapped.contents || '').slice(0, 80_000); // cap to keep prompt size sane
+  if (!pageRes.ok) {
+    throw new Error(`crawl failed: allorigins returned ${pageRes.status}`);
+  }
+  const wrappedPage = await pageRes.json();
+  const pageHtml = (wrappedPage && wrappedPage.contents || '').slice(0, 80_000);
+  if (!pageHtml.trim()) {
+    throw new Error('crawl returned empty page (target may be down or blocking allorigins)');
   }
 
   // Build the App QA prompt — mirrors qualmly.dev's runCheck prompt
@@ -344,23 +360,46 @@ Cover all 8 categories.`;
   const anthropicData = await callAnthropic(anthropicKey, prompt);
   const reportData = parseClaudeJson((anthropicData.content || []).map(c => c.text || '').join(''));
 
+  // Sanitize Claude's output before persisting. The model is steered to
+  // return sober JSON, but a malicious target page COULD prompt-inject the
+  // model into emitting <script>...</script> in a category name or summary.
+  // We persist these strings into KV and they're round-tripped to the
+  // dashboard via /api/watch/:id/results — if any consumer ever uses
+  // innerHTML, we'd have stored XSS. Strip HTML metacharacters at the
+  // boundary; the dashboard already uses textContent but defense-in-depth.
+  const stripHtml = (s, max = 500) => String(s == null ? '' : s)
+    .replace(/[<>]/g, '')
+    .replace(/[-]/g, ' ') // strip control chars
+    .slice(0, max);
+
+  const safeCategories = (reportData.categories || []).slice(0, 20).map(cat => ({
+    id:   stripHtml(cat.id, 50),
+    name: stripHtml(cat.name, 80),
+    status: stripHtml(cat.status, 20),
+    issues: (cat.issues || []).slice(0, 50).map(iss => ({
+      text:     stripHtml(iss.text, 500),
+      severity: stripHtml(iss.severity, 20).toLowerCase()
+    })),
+    recommendation: stripHtml(cat.recommendation, 500)
+  }));
+
   // Flatten categories into top-level findings for easier diff
   const flatFindings = [];
-  for (const cat of reportData.categories || []) {
+  for (const cat of safeCategories) {
     for (const iss of cat.issues || []) {
       flatFindings.push({
         title: (iss.text || '').slice(0, 200),
         category: cat.id,
-        severity: (iss.severity || 'info').toLowerCase()
+        severity: iss.severity || 'info'
       });
     }
   }
 
   const newResult = {
     scannedAt: Date.now(),
-    score: typeof reportData.score === 'number' ? reportData.score : 0,
-    summary: reportData.summary || '',
-    categories: reportData.categories || [],
+    score: typeof reportData.score === 'number' ? Math.max(0, Math.min(100, reportData.score)) : 0,
+    summary: stripHtml(reportData.summary, 1000),
+    categories: safeCategories,
     findings: flatFindings,
     cost: calcAnthropicCost(anthropicData.usage)
   };
@@ -393,9 +432,13 @@ Cover all 8 categories.`;
   }
 }
 
-async function callAnthropic(apiKey, prompt) {
+async function callAnthropic(apiKey, prompt, opts = {}) {
   const RETRY_STATUSES = new Set([500, 502, 503, 504, 529]);
-  const MAX_ATTEMPTS = 3;
+  // In the cron path we explicitly skip retries — sleeping 1.5+4.5+13.5=19.5s
+  // would eat into the scheduled-event CPU budget for no benefit (the next
+  // hourly cron will retry anyway). For interactive paths (none currently)
+  // pass `{ retries: true }`.
+  const MAX_ATTEMPTS = opts.retries ? 3 : 1;
   let lastErr = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
@@ -422,7 +465,7 @@ async function callAnthropic(apiKey, prompt) {
       }
       lastErr = new Error(`Anthropic API ${res.status}: ${bodyText}`);
     } catch (e) {
-      // Network errors / AbortError — retry these.
+      // Network errors / AbortError — would retry these if retries enabled.
       if (e && e.name === 'AbortError') {
         lastErr = new Error('Anthropic API timeout (90s)');
       } else if (lastErr === null || e.message !== lastErr.message) {
@@ -430,13 +473,13 @@ async function callAnthropic(apiKey, prompt) {
       }
     }
     if (attempt < MAX_ATTEMPTS - 1) {
-      // Exponential backoff: 1.5s, 4.5s, 13.5s. Reduces the chance that a
-      // brief Anthropic incident skips ALL of a user's scans for the hour.
+      // Exponential backoff: 1.5s, 4.5s. Only used when retries explicitly
+      // enabled (not in cron path — see comment at top of function).
       const delay = 1500 * Math.pow(3, attempt);
       await new Promise(r => setTimeout(r, delay));
     }
   }
-  throw lastErr || new Error('Anthropic API: all retries failed');
+  throw lastErr || new Error('Anthropic API: all attempts failed');
 }
 
 // Hardened: never throws. If we can't parse Claude's response, we return a
@@ -508,9 +551,17 @@ async function sendDiffEmail(watch, prev, next, env) {
     console.warn('[monitor] RESEND_API_KEY not set — email skipped for', watch.email);
     return true;
   }
-  // Strip CRLF from targetUrl before interpolating into the subject — guards
-  // against header-injection if the URL ever contains \r\n.
-  const safeUrl = String(watch.targetUrl || '').replace(/[\r\n]/g, '');
+  // Strip CRLF from targetUrl AND email before interpolating — guards
+  // against header-injection (a \r\nBcc: attacker@evil.com payload in the
+  // recipient field would BCC the attacker on every diff alert). Even
+  // though handleRegister already strips on input, defense-in-depth at the
+  // Resend boundary in case anything else writes to watch.email later.
+  const safeUrl   = String(watch.targetUrl || '').replace(/[\r\n]/g, '');
+  const safeEmail = String(watch.email     || '').replace(/[\r\n]/g, '').trim();
+  if (!safeEmail) {
+    console.error('[monitor] watch has empty email after sanitization:', watch.id);
+    return true; // soft-skip: don't loop on this forever
+  }
   const subject = prev
     ? `Qualmly: ${safeUrl} score is now ${next.score}/100 (was ${prev.score})`
     : `Qualmly: first scan of ${safeUrl} — score ${next.score}/100`;
@@ -523,7 +574,7 @@ async function sendDiffEmail(watch, prev, next, env) {
       },
       body: JSON.stringify({
         from: 'Qualmly Monitor <monitor@qualmly.dev>',
-        to: [watch.email],
+        to: [safeEmail],
         reply_to: 'info@darkpixelconsultinginc.co',
         subject,
         html: buildEmailHtml(watch, prev, next)
@@ -552,7 +603,9 @@ async function sendPausedEmail(watch, errorMsg, env) {
     console.warn('[monitor] RESEND_API_KEY not set — paused email skipped');
     return true;
   }
-  const safeUrl = String(watch.targetUrl || '').replace(/[\r\n]/g, '');
+  const safeUrl   = String(watch.targetUrl || '').replace(/[\r\n]/g, '');
+  const safeEmail = String(watch.email     || '').replace(/[\r\n]/g, '').trim();
+  if (!safeEmail) { console.error('[monitor] paused email: empty email', watch.id); return true; }
   const escape = (s) => String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#0E0E15;color:#F2F2F5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
@@ -581,7 +634,7 @@ async function sendPausedEmail(watch, errorMsg, env) {
       },
       body: JSON.stringify({
         from: 'Qualmly Monitor <monitor@qualmly.dev>',
-        to: [watch.email],
+        to: [safeEmail],
         reply_to: 'info@darkpixelconsultinginc.co',
         subject: `Qualmly: monitoring paused for ${safeUrl}`,
         html
@@ -719,12 +772,27 @@ async function handleRegister(request, env) {
 
   // Validate email shape + length. Resend rejects malformed emails on send;
   // we'd rather fail at registration than silently never email the user.
-  const emailNorm = String(email).trim().toLowerCase();
+  // Strip any CR/LF — defense in depth against header injection in the email
+  // 'to' field downstream.
+  const emailNorm = String(email).replace(/[\r\n]/g, '').trim().toLowerCase();
   if (emailNorm.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
     return json({ error: 'invalid email' }, 400);
   }
   if (typeof passphrase !== 'string' || passphrase.length < 12 || passphrase.length > 200) {
     return json({ error: 'passphrase must be 12-200 chars' }, 400);
+  }
+
+  // Reject re-register on a known email. The previous behaviour was "create a
+  // new userId, overwrite the email→userId index, orphan the old user." This
+  // means an attacker who learns a victim's email could re-register and become
+  // the canonical owner. With this check, returning users either resume their
+  // existing record (passphrase still encrypts the original blob) or get a
+  // clear 409 to contact support.
+  const existingUserId = await env.USERS.get(`email:${emailNorm}`);
+  if (existingUserId) {
+    return json({
+      error: 'an account with this email already exists. If this is yours, sign back in via the Monitor tab. If not, email hello@qualmly.dev.'
+    }, 409);
   }
 
   // Persist the encrypted Anthropic-key blob. Either we got it pre-encrypted
@@ -849,12 +917,14 @@ async function handleAddWatch(request, env) {
   const urlCheck = validatePublicUrl(targetUrl);
   if (!urlCheck.ok) return json({ error: 'targetUrl invalid: ' + urlCheck.reason }, 400);
 
-  // Clamp intervalDays to a sane range. A user posting `0.0001` would make
-  // the watch "due" every cron forever; `-1` would make `dueAt` always in
-  // the past.
+  // Whitelist intervalDays to the values the UI offers. Anything outside
+  // this set is silently coerced to the default. Prevents a user (or a
+  // devtools-edited POST) from setting interval=0 (scan every cron =
+  // burns the user's Anthropic credit), interval=0.5 (rounds weird),
+  // or interval=99999 (`dueAt` overflows when stored as ms).
+  const ALLOWED_INTERVALS = new Set([1, 7, 14, 30]);
   let safeInterval = parseInt(intervalDays, 10);
-  if (!Number.isFinite(safeInterval) || safeInterval < 1)   safeInterval = 7;
-  if (safeInterval > 365) safeInterval = 365;
+  if (!ALLOWED_INTERVALS.has(safeInterval)) safeInterval = 7;
 
   const safeBuilder = (typeof builder === 'string' ? builder : 'lovable').slice(0, 30);
   const safeAppType = (typeof appType === 'string' ? appType : 'saas').slice(0, 30);
@@ -868,6 +938,22 @@ async function handleAddWatch(request, env) {
   // credit not ours). Re-enable in v1.4.1 once Gumroad webhook handler is wired
   // to flip subscriptionActive automatically on purchase.
   // if (!user.subscriptionActive) return json({ error: 'subscription not active' }, 402);
+
+  // Cap watches per user at 25. Without this, a single user (or a
+  // compromised userId) could POST thousands of watches → cron tries to
+  // scan all → KV bloat (the index list grows past the 25MB value cap),
+  // subrequest budget exhausted, all OTHER users' scans break. 25 is well
+  // above what any honest customer needs (median Pro user is 1-3 watches).
+  const MAX_WATCHES_PER_USER = 25;
+  const indexKey = `user_watches:${userId}`;
+  const existingIndex = await env.WATCHES.get(indexKey);
+  let watchIds = [];
+  try { watchIds = existingIndex ? JSON.parse(existingIndex) : []; } catch(e) { watchIds = []; }
+  if (watchIds.length >= MAX_WATCHES_PER_USER) {
+    return json({
+      error: `you've hit the ${MAX_WATCHES_PER_USER}-watch cap. Remove a watch first or email hello@qualmly.dev for an enterprise tier.`
+    }, 403);
+  }
 
   // Per-user watch index. Both the watch record and the user's index list
   // are written. The list lets handleListWatches do O(1) lookup per user
@@ -890,15 +976,12 @@ async function handleAddWatch(request, env) {
     // canonical source is user.subscriptionActive, looked up at scan time.
   };
 
-  await env.WATCHES.put(`watch:${watchId}`, JSON.stringify(watch));
-
-  // Update the per-user watch index.
-  const indexKey = `user_watches:${userId}`;
-  const existing = await env.WATCHES.get(indexKey);
-  let watchIds = [];
-  try { watchIds = existing ? JSON.parse(existing) : []; } catch(e) { watchIds = []; }
+  // Write the per-user index FIRST (so a partial-failure leaves the watch
+  // unfindable rather than orphan-billable), then the watch record itself.
+  // Cap-check at top of function ensures we won't ever exceed MAX_WATCHES.
   if (!watchIds.includes(watchId)) watchIds.push(watchId);
   await env.WATCHES.put(indexKey, JSON.stringify(watchIds));
+  await env.WATCHES.put(`watch:${watchId}`, JSON.stringify(watch));
 
   return json({ watchId });
 }

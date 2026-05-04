@@ -3022,6 +3022,46 @@ function switchMode(mode) {
 const MONITOR_API_BASE = "https://qualmly-monitor.qualmly.workers.dev";
 const MONITOR_USER_KEY = "qualmly_monitor_user";
 
+// Module-level reentry guard for monitorSubscribe. Belt-and-suspenders with
+// the button-disable below: if the user double-clicks faster than the JS
+// event loop can disable the button (rare but possible on slow phones),
+// this prevents two simultaneous /api/checkout calls + two redirects.
+let _monitorCheckoutInFlight = false;
+
+// Robust localStorage helpers — silently no-op when storage is full,
+// blocked (private mode), or otherwise unavailable. Earlier code mixed
+// guarded and unguarded setItem calls; consolidating here.
+function _monitorLsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) { /* private mode / quota */ }
+}
+function _monitorLsGet(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function _monitorLsRemove(key) {
+  try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+}
+
+// Filter network/server errors before they reach the visible UI. Earlier
+// behavior interpolated the server's response body verbatim into the error
+// box — if the worker ever echoed back the request body in a 4xx (it doesn't
+// today, but defense in depth), the user's passphrase would round-trip into
+// a visible DOM string. This whitelists known-safe shapes and falls back
+// to a generic message otherwise.
+function _monitorSafeErr(err) {
+  if (!err) return "Something went wrong. Try again.";
+  const msg = String(err.message || err);
+  // Allow our own thrown messages and generic network errors through.
+  if (/^(Register failed|Couldn't add watch|Couldn't open|No checkoutUrl|That doesn't look|Watch URL|Enter a valid|Passphrase|Couldn't load watches|Couldn't remove|Add failed)/.test(msg)) {
+    // Strip anything that looks like JSON or curly-brace content to avoid
+    // accidentally surfacing the request body.
+    return msg.replace(/\{[\s\S]*\}/g, '').slice(0, 200);
+  }
+  if (msg === "Failed to fetch") {
+    return "Couldn't reach the Monitor server. Check your internet, then try again.";
+  }
+  return "Something went wrong. Try again — and email hello@qualmly.dev if it persists.";
+}
+
 // Pretend Stripe Checkout session creation lives at the Worker too. For the
 // MVP launch the user can configure either:
 //   (a) a direct Stripe Payment Link (`https://buy.stripe.com/…`) configured
@@ -3029,6 +3069,8 @@ const MONITOR_USER_KEY = "qualmly_monitor_user";
 //   (b) a Worker endpoint /api/checkout that creates a session per-email.
 // The UI doesn't care which — it POSTs and uses whatever URL comes back.
 async function monitorSubscribe() {
+  if (_monitorCheckoutInFlight) return;
+  _monitorCheckoutInFlight = true;
   const btn = document.getElementById("monitor-subscribe-btn");
   if (btn) { btn.disabled = true; btn.textContent = "Opening Stripe…"; }
   try {
@@ -3050,14 +3092,18 @@ async function monitorSubscribe() {
     if (!res.ok) throw new Error("Checkout endpoint returned " + res.status);
     const data = await res.json();
     if (!data.checkoutUrl) throw new Error("No checkoutUrl in response");
-    // Stash a "pending checkout" flag so when the user comes back to the
-    // tab we know to show the onboard form instead of the pitch.
-    localStorage.setItem("qualmly_monitor_pending_checkout", "1");
+    // Stash the pending flag ONLY after we have a valid redirect URL — earlier
+    // we set this before parsing the response, which trapped users in the
+    // onboard state if they cancelled the Stripe page (the flag persisted
+    // across sessions and made monitorRefreshDashboard show the onboard form
+    // even though they'd never paid).
+    _monitorLsSet("qualmly_monitor_pending_checkout", "1");
     window.location.href = data.checkoutUrl;
   } catch (err) {
     console.error("[monitor]", err);
     if (btn) { btn.disabled = false; btn.textContent = "⚡ Subscribe — $99/yr"; }
-    alert("Couldn't open Stripe Checkout: " + (err.message || err) + "\n\nIf this persists, email hello@qualmly.dev — we'll onboard you manually.");
+    alert(_monitorSafeErr(err) + "\n\nIf this persists, email hello@qualmly.dev — we'll onboard you manually.");
+    _monitorCheckoutInFlight = false;
   }
 }
 
@@ -3066,30 +3112,47 @@ function monitorShowOnboard() {
   document.getElementById("monitor-pitch").style.display = "none";
   document.getElementById("monitor-onboard").style.display = "block";
   document.getElementById("monitor-dashboard").style.display = "none";
-  // Pre-fill email if we know one
-  try {
-    const cached = localStorage.getItem("qualmly_monitor_email");
-    if (cached) document.getElementById("mon-email").value = cached;
-  } catch(e) {}
+  // Clear any stale error from a previous failed attempt — earlier the red
+  // box stuck around when the user re-entered onboard from pitch.
+  const errEl = document.getElementById("monitor-onboard-error");
+  if (errEl) { errEl.textContent = ""; errEl.style.display = "none"; }
+  // Pre-fill email from local cache only (NOT from query params — see
+  // monitorRefreshDashboard for the phishing-defense rationale).
+  const cached = _monitorLsGet("qualmly_monitor_email");
+  if (cached) document.getElementById("mon-email").value = cached;
 }
 
-// Pull saved user from localStorage
+// Pull saved user from localStorage. Validates shape — earlier this returned
+// the raw parsed value, so a string like '"hello"' would later throw when
+// downstream code accessed .userId on a string.
 function _monitorGetUser() {
-  try {
-    const raw = localStorage.getItem(MONITOR_USER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch(e) { return null; }
+  const raw = _monitorLsGet(MONITOR_USER_KEY);
+  if (!raw) return null;
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch(e) { return null; }
+  if (!parsed || typeof parsed !== "object" || typeof parsed.userId !== "string" || parsed.userId.length === 0) {
+    return null;
+  }
+  return parsed;
 }
 
 function _monitorSetUser(user) {
-  if (user) localStorage.setItem(MONITOR_USER_KEY, JSON.stringify(user));
-  else localStorage.removeItem(MONITOR_USER_KEY);
+  if (user) _monitorLsSet(MONITOR_USER_KEY, JSON.stringify(user));
+  else      _monitorLsRemove(MONITOR_USER_KEY);
 }
 
 // Decide which sub-state of the Monitor screen to show.
 async function monitorRefreshDashboard() {
   const screen = document.getElementById("monitor-screen");
   if (!screen || screen.style.display === "none") return;
+
+  // If the user just cancelled Stripe / Gumroad, clear the pending flag so
+  // monitorRefreshDashboard correctly drops back to the pitch instead of
+  // trapping them in the onboard form.
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("checkout") === "cancel") {
+    _monitorLsRemove("qualmly_monitor_pending_checkout");
+  }
 
   const user = _monitorGetUser();
   if (user && user.userId) {
@@ -3100,15 +3163,18 @@ async function monitorRefreshDashboard() {
     await _monitorLoadWatches();
     return;
   }
-  // Not registered → check for ?checkout=success (Stripe redirect)
-  const params = new URLSearchParams(window.location.search);
+  // Not registered → check for ?checkout=success (Gumroad/Stripe redirect)
   const justPaid = params.get("checkout") === "success" ||
-                   localStorage.getItem("qualmly_monitor_pending_checkout") === "1";
+                   _monitorLsGet("qualmly_monitor_pending_checkout") === "1";
   if (justPaid) {
     monitorShowOnboard();
-    // Pre-fill email if Stripe passed it back
-    const stripeEmail = params.get("email");
-    if (stripeEmail) document.getElementById("mon-email").value = stripeEmail;
+    // Phishing defense: do NOT honor a `?email=` query param even if Gumroad
+    // passes one back. An attacker URL like
+    //   qualmly.dev/?mode=monitor&checkout=success&email=victim@x.com
+    // would otherwise pre-fill the email and the victim could register
+    // under attacker's email, redirecting all diff alerts there.
+    // Email is pre-filled ONLY from a value the user typed locally (cached
+    // in localStorage by the onboard handler).
   } else {
     document.getElementById("monitor-pitch").style.display = "block";
     document.getElementById("monitor-onboard").style.display = "none";
@@ -3127,13 +3193,33 @@ async function monitorRegisterAndAddWatch() {
   const anthropicKey = document.getElementById("mon-anthropic-key").value.trim();
   const watchUrl = document.getElementById("mon-watch-url").value.trim();
   const builder = document.getElementById("mon-builder").value;
-  const intervalDays = parseInt(document.getElementById("mon-interval").value, 10) || 7;
+  // Whitelist intervalDays — must match Worker validation and the <select>
+  // options. A devtools-edited <select> value would otherwise produce a
+  // confusing 200 from the server with an interval that gets silently
+  // coerced to the default. Catch it client-side for a better error.
+  const ALLOWED_INTERVALS = [1, 7, 14, 30];
+  const rawInterval = parseInt(document.getElementById("mon-interval").value, 10);
+  const intervalDays = ALLOWED_INTERVALS.includes(rawInterval) ? rawInterval : 7;
 
   // Light client-side validation. Final validation belongs server-side.
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return _monitorError(errEl, "Enter a valid email.");
-  if (passphrase.length < 12) return _monitorError(errEl, "Passphrase must be at least 12 characters.");
-  if (!/^sk-ant-[A-Za-z0-9_-]{40,}/.test(anthropicKey)) return _monitorError(errEl, "That doesn't look like an Anthropic key (should start with sk-ant-).");
-  if (!/^https?:\/\//.test(watchUrl)) return _monitorError(errEl, "Watch URL must start with http:// or https://");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+    return _monitorError(errEl, "Enter a valid email.");
+  }
+  if (passphrase.length < 12 || passphrase.length > 200) {
+    return _monitorError(errEl, "Passphrase must be 12–200 characters.");
+  }
+  // Anchor the regex on BOTH ends — earlier `/^sk-ant-…{40,}/` was
+  // unanchored at the end, so `sk-ant-aaaa…aaa<script>` would pass and
+  // get encrypted as-is, then 401 every scan against Anthropic.
+  if (!/^sk-ant-[A-Za-z0-9_-]{40,}$/.test(anthropicKey) || anthropicKey.length > 500) {
+    return _monitorError(errEl, "That doesn't look like an Anthropic key (should start with sk-ant- and contain only letters/numbers/dashes/underscores).");
+  }
+  // Require https:// only — defense-in-depth alongside the Worker validator.
+  // http:// targets are rejected because (a) the cron only fetches https,
+  // (b) plaintext leaks the bundle path through any intermediate proxy.
+  if (!/^https:\/\//i.test(watchUrl) || watchUrl.length > 2000) {
+    return _monitorError(errEl, "Watch URL must start with https:// (and be ≤ 2000 chars).");
+  }
 
   if (btn) { btn.disabled = true; btn.textContent = "Encrypting + registering…"; }
 
@@ -3155,8 +3241,17 @@ async function monitorRegisterAndAddWatch() {
       })
     });
     if (!regRes.ok) {
-      const t = await regRes.text();
-      throw new Error("Register failed: " + regRes.status + " " + t.slice(0, 200));
+      // 409: email already registered (returning user). 400/500: validation /
+      // server. Read the error message from a JSON envelope ONLY — never
+      // interpolate the raw response body (which could in principle echo back
+      // request fields). _monitorSafeErr further constrains what reaches the UI.
+      let serverMsg = "";
+      try {
+        const j = await regRes.json();
+        if (j && typeof j.error === "string") serverMsg = j.error.slice(0, 200);
+      } catch (e) { /* non-JSON body — ignore, fall through to generic */ }
+      const m = serverMsg || "registration failed (status " + regRes.status + ")";
+      throw new Error("Register failed: " + m);
     }
     const regData = await regRes.json();
     if (!regData.userId) throw new Error("Register response missing userId");
@@ -3164,8 +3259,8 @@ async function monitorRegisterAndAddWatch() {
     // Persist before adding the watch — if /api/watch fails we still want the
     // user to be able to open the dashboard and try again.
     _monitorSetUser({ userId: regData.userId, email, registeredAt: Date.now() });
-    try { localStorage.setItem("qualmly_monitor_email", email); } catch(e) {}
-    localStorage.removeItem("qualmly_monitor_pending_checkout");
+    _monitorLsSet("qualmly_monitor_email", email);
+    _monitorLsRemove("qualmly_monitor_pending_checkout");
 
     // Add the first watch. If THIS fails after registration succeeded, we
     // do NOT throw — the user is already persisted, and forcing them to
@@ -3181,12 +3276,16 @@ async function monitorRegisterAndAddWatch() {
       });
       if (!watchRes.ok) {
         watchAddOk = false;
-        const t = await watchRes.text();
-        watchAddErrText = "Couldn't add watch: " + watchRes.status + " " + t.slice(0, 200);
+        let serverMsg = "";
+        try {
+          const j = await watchRes.json();
+          if (j && typeof j.error === "string") serverMsg = j.error.slice(0, 200);
+        } catch (e) { /* ignore non-JSON */ }
+        watchAddErrText = "Couldn't add watch: " + (serverMsg || ("status " + watchRes.status));
       }
     } catch (we) {
       watchAddOk = false;
-      watchAddErrText = "Couldn't add watch: " + (we.message || String(we));
+      watchAddErrText = "Couldn't add watch: " + _monitorSafeErr(we);
     }
 
     if (watchAddOk) {
@@ -3212,7 +3311,7 @@ async function monitorRegisterAndAddWatch() {
     }
   } catch (err) {
     console.error("[monitor]", err);
-    _monitorError(errEl, err.message || String(err));
+    _monitorError(errEl, _monitorSafeErr(err));
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "⚡ Activate monitoring"; }
     // Always clear sensitive fields after the call attempt — whether it
@@ -3258,7 +3357,7 @@ async function _monitorLoadWatches() {
     const div = document.createElement("div");
     div.className = "error-box";
     div.style.display = "block";
-    div.textContent = "Couldn't load watches: " + (err.message || err);
+    div.textContent = "Couldn't load watches: " + _monitorSafeErr(err);
     list.appendChild(div);
   }
 }
@@ -3291,7 +3390,23 @@ function _renderWatches(container, watches) {
     del.className = "reset-btn";
     del.style.cssText = "color:var(--fail);border-color:rgba(255,77,109,0.25)";
     del.textContent = "Remove";
-    del.addEventListener("click", () => monitorDeleteWatch(w.id, w.targetUrl));
+    // Debounce: disable the button as soon as it's clicked. Earlier a
+    // double-click fired two DELETEs; the second 404'd and surfaced a
+    // confusing "Couldn't remove: status 404" alert AFTER the first one
+    // succeeded.
+    del.addEventListener("click", async () => {
+      if (del.disabled) return;
+      del.disabled = true;
+      del.textContent = "Removing…";
+      try {
+        await monitorDeleteWatch(w.id, w.targetUrl);
+      } finally {
+        // _monitorLoadWatches re-renders the whole list on success, so this
+        // button instance is gone — restoring state only matters on cancel.
+        del.disabled = false;
+        del.textContent = "Remove";
+      }
+    });
     card.appendChild(left); card.appendChild(del);
     container.appendChild(card);
   }
@@ -3306,11 +3421,13 @@ async function monitorDeleteWatch(watchId, label) {
       method: "DELETE",
       headers: { "x-qualmly-user": user.userId }
     });
-    if (!res.ok) throw new Error("Delete failed: " + res.status);
+    // Treat 404 as success — concurrent delete from another tab or a
+    // double-click both end up here. Either way, the watch is gone.
+    if (!res.ok && res.status !== 404) throw new Error("Couldn't remove: status " + res.status);
     showToast("✓ Watch removed");
     await _monitorLoadWatches();
   } catch (err) {
-    alert("Couldn't remove: " + (err.message || err));
+    alert(_monitorSafeErr(err));
   }
 }
 
@@ -3324,7 +3441,10 @@ function monitorHideAddWatchForm() {
   document.getElementById("monitor-add-watch-error").style.display = "none";
 }
 
+// Debounce guard for monitorAddWatch — same rationale as Subscribe / Remove.
+let _monitorAddInFlight = false;
 async function monitorAddWatch() {
+  if (_monitorAddInFlight) return;
   const errEl = document.getElementById("monitor-add-watch-error");
   errEl.style.display = "none";
   const user = _monitorGetUser();
@@ -3332,9 +3452,16 @@ async function monitorAddWatch() {
 
   const targetUrl = document.getElementById("mon-add-url").value.trim();
   const builder   = document.getElementById("mon-add-builder").value;
-  const intervalDays = parseInt(document.getElementById("mon-add-interval").value, 10) || 7;
-  if (!/^https?:\/\//.test(targetUrl)) return _monitorError(errEl, "URL must start with http:// or https://");
+  // Whitelist intervalDays — must match Worker validation. (See
+  // monitorRegisterAndAddWatch for the same logic on the onboard form.)
+  const ALLOWED_INTERVALS = [1, 7, 14, 30];
+  const rawInterval = parseInt(document.getElementById("mon-add-interval").value, 10);
+  const intervalDays = ALLOWED_INTERVALS.includes(rawInterval) ? rawInterval : 7;
+  if (!/^https:\/\//i.test(targetUrl) || targetUrl.length > 2000) {
+    return _monitorError(errEl, "URL must start with https:// (and be ≤ 2000 chars).");
+  }
 
+  _monitorAddInFlight = true;
   try {
     const res = await fetch(MONITOR_API_BASE + "/api/watch", {
       method: "POST",
@@ -3342,14 +3469,20 @@ async function monitorAddWatch() {
       body: JSON.stringify({ targetUrl, intervalDays, builder, appType: "saas" })
     });
     if (!res.ok) {
-      const t = await res.text();
-      throw new Error("Add failed: " + res.status + " " + t.slice(0, 200));
+      let serverMsg = "";
+      try {
+        const j = await res.json();
+        if (j && typeof j.error === "string") serverMsg = j.error.slice(0, 200);
+      } catch (e) { /* ignore */ }
+      throw new Error("Add failed: " + (serverMsg || ("status " + res.status)));
     }
     monitorHideAddWatchForm();
     showToast("✓ Watch added");
     await _monitorLoadWatches();
   } catch (err) {
-    _monitorError(errEl, err.message || String(err));
+    _monitorError(errEl, _monitorSafeErr(err));
+  } finally {
+    _monitorAddInFlight = false;
   }
 }
 
