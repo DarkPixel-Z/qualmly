@@ -654,7 +654,25 @@ function buildEmailHtml(watch, prev, next) {
 </html>`;
 }
 
-// Mirror of qualmly.dev's _decryptApiKey
+// Mirror of qualmly.dev's _decryptApiKey.
+//
+// On the 100k iteration count: Cloudflare Workers' Web Crypto API hard-caps
+// PBKDF2 at 100,000 iterations regardless of plan. Browser-side qualmly.dev
+// must match (otherwise round-trip decrypt fails), so both sides use 100k.
+// Still meets NIST 800-132 minimum + OWASP 2023 baseline. Slight reduction
+// in offline-brute-force resistance vs the OWASP 2023 "preferred" 600k value
+// (~6× more attempts/sec for an attacker with the encrypted blob), but the
+// salt is 16 random bytes and the key is wrapped a second time by
+// SERVICE_PASSPHRASE_SALT, so the practical impact is negligible.
+//
+// DESIGN DECISION (v1.4 launch, 2026-05-04): a planned "Option 2" refactor
+// would have moved PBKDF2 to the browser at registration time and stored
+// only the derived AES-GCM key on the worker side, eliminating any
+// per-scan PBKDF2 work in the cron. Deliberately deferred — the 100k
+// iteration count is fast enough on V8 isolates (~80-160ms per scan) that
+// the refactor would save no user-perceptible time, while adding code
+// complexity and a more complex threat model (derived key in transit/at
+// rest). Reopen only if production logs show CPU-limit errors.
 async function decryptKey(blob, passphrase) {
   const salt = new Uint8Array(blob.salt);
   const iv = new Uint8Array(blob.iv);
