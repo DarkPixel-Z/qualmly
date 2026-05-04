@@ -6,7 +6,7 @@ All copy below is launch-day ready. Drop into the relevant text field, hit send.
 
 # Twitter / X — primary launch tweet (9:45 AM ET)
 
-**Image to attach:** screenshot of qualmly.dev with the App QA scan results card showing a real Stripe-key finding (lime gradient + dark UI). Crop to 1200×675 (Twitter card aspect).
+**Image to attach:** `marketing/launch-assets/2-results-card-twitter.png` (1200×675, ready to drop in). Shows matchwise.app with score 47, 2 passed / 1 warning / 2 failed, real-looking critical findings. This is the matching visual for the dataset hook in the tweet body.
 
 ```
 I scanned 10 vibe-coded apps and found:
@@ -59,6 +59,8 @@ something new breaks.
 $99/yr per app. We make money on the slot — you make money on
 the catches.
 ```
+
+**Attach to reply 3:** `marketing/launch-assets/4-monitor-pitch-twitter.png` (1200×675). Visual proof the Pro tier exists, with the "Catch regressions while you sleep" hero + 3-step explainer.
 
 Reply 4 of 4 (the open question — drives replies):
 
@@ -128,6 +130,8 @@ Cheers, Amanda
 
 Conner runs a YT channel that covers AI dev tooling. Email > DM for him.
 
+**Attach to email:** `marketing/launch-assets/2-results-card-twitter.png` (the matchwise.app scan card). It does the visual heavy-lifting for "this thing actually works."
+
 ```
 Subject: Audit data on 10 vibe-coded apps — useful for a video?
 
@@ -163,6 +167,8 @@ DarkPixel Consulting
 # Cole Medin email — 11:00 AM ET
 
 Cole's audience overlaps with the "AI agents in production" segment — perfect Monitor target.
+
+**Attach to email:** `marketing/launch-assets/5-monitor-dashboard-twitter.png` (the active-watches dashboard). Cole specifically cares about post-deploy monitoring; the dashboard shot beats the pitch screen for his audience.
 
 ```
 Subject: Continuous security rescans for AI-built apps — built it after the n8n thread

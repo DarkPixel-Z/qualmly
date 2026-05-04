@@ -157,3 +157,11 @@ Cold-tagging strangers gets ignored. Warm-tagging known supporters gets you 3-5 
 - Quotes from the audited apps. You haven't completed the 14-day disclosure window yet.
 - Specific company names. Aggregated stats only until disclosure replies are in.
 - Animations / GIFs. LinkedIn de-prioritizes posts with native videos vs static text+image. One screenshot at most.
+
+## The one screenshot to attach
+
+**File:** `marketing/launch-assets/2-results-card-linkedin.png` (1200×627, ready)
+
+LinkedIn's preview card is 1200×627 (slightly different aspect than Twitter's 1200×675 — we generated both already). Shows the matchwise.app scan with critical findings front-and-center. This is the only visual that should go on the post — pure dark UI + lime accent, scans as "real product, not concept."
+
+Do NOT attach: native video, GIF, multiple images, an animated walkthrough. LinkedIn de-prioritizes posts with native video vs static text+image, and multi-image posts dilute the algorithmic ranking signal. One image, one story, one comment-link.
