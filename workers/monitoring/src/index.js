@@ -210,7 +210,9 @@ async function _scanOneWatch(keyName, watch, now, env) {
   const userJson = await env.USERS.get(`user:${watch.userId}`);
   if (!userJson) return 'skipped';
   let user; try { user = JSON.parse(userJson); } catch(e) { return 'skipped'; }
-  if (!user.subscriptionActive) return 'skipped';
+  // v1.4 LAUNCH: subscriptionActive gate disabled (honor-system mode).
+  // See handleAddWatch for full rationale. Re-enable in v1.4.1.
+  // if (!user.subscriptionActive) return 'skipped';
 
   const intervalMs = (watch.intervalDays || 7) * 24 * 60 * 60 * 1000;
   const dueAt = (watch.lastScanAt || 0) + intervalMs;
@@ -660,7 +662,7 @@ async function decryptKey(blob, passphrase) {
   const enc = new TextEncoder();
   const pwKey = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
   const aesKey = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 300000, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
     pwKey,
     { name: 'AES-GCM', length: 256 },
     false,
@@ -843,7 +845,11 @@ async function handleAddWatch(request, env) {
   const userJson = await env.USERS.get(`user:${userId}`);
   if (!userJson) return json({ error: 'user not found' }, 404);
   const user = JSON.parse(userJson);
-  if (!user.subscriptionActive) return json({ error: 'subscription not active' }, 402);
+  // v1.4 LAUNCH: subscriptionActive enforcement is honor-system (Amanda manually
+  // onboards via private flow, BYOK means scan cost is on the user's Anthropic
+  // credit not ours). Re-enable in v1.4.1 once Gumroad webhook handler is wired
+  // to flip subscriptionActive automatically on purchase.
+  // if (!user.subscriptionActive) return json({ error: 'subscription not active' }, 402);
 
   // Per-user watch index. Both the watch record and the user's index list
   // are written. The list lets handleListWatches do O(1) lookup per user
@@ -1210,7 +1216,7 @@ async function encryptKey(plaintext, passphrase) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const pwKey = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
   const aesKey = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 300000, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
     pwKey,
     { name: 'AES-GCM', length: 256 },
     false,
