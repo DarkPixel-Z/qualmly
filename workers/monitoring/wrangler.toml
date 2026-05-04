@@ -10,15 +10,15 @@ crons = ["0 * * * *"]
 # then paste the IDs here.
 [[kv_namespaces]]
 binding = "USERS"
-id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+id = "a0ca07227b7046f082902681474a5b89"
 
 [[kv_namespaces]]
 binding = "WATCHES"
-id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+id = "56e22ce29e0e402a9dc0f7c481160b9f"
 
 [[kv_namespaces]]
 binding = "HISTORY"
-id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+id = "18a0d7dcd7d140c69638cb3f240aced5"
 
 # Secrets (set via `wrangler secret put <NAME>`):
 #   - RESEND_API_KEY      — for sending diff emails (resend.com)
@@ -28,6 +28,6 @@ id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
 [observability]
 enabled = true
 
-# Limits — keep this Worker on the free tier as long as possible
-[limits]
-cpu_ms = 50
+# Note: [limits] cpu_ms is a paid-plan feature. Free plan default (10ms) is
+# sufficient because the Worker is mostly waiting on Anthropic's response,
+# which doesn't count against CPU time.

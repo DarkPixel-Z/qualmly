@@ -498,8 +498,13 @@ function shouldNotify(prev, next) {
 
 async function sendDiffEmail(watch, prev, next, env) {
   if (!env.RESEND_API_KEY) {
+    // Email is intentionally not configured (e.g. early launch where the
+    // operator is reading scan results manually via the dashboard). Treat
+    // as "delivered" so runScanForWatch advances the `latest` pointer —
+    // otherwise we'd re-scan the same target every cron tick and burn the
+    // user's Anthropic credit on duplicate work.
     console.warn('[monitor] RESEND_API_KEY not set — email skipped for', watch.email);
-    return false;
+    return true;
   }
   // Strip CRLF from targetUrl before interpolating into the subject — guards
   // against header-injection if the URL ever contains \r\n.
@@ -540,8 +545,10 @@ async function sendDiffEmail(watch, prev, next, env) {
 // regular diff alert.
 async function sendPausedEmail(watch, errorMsg, env) {
   if (!env.RESEND_API_KEY) {
+    // Same rationale as sendDiffEmail above — treat unconfigured as
+    // success so the pause-state still records correctly in KV.
     console.warn('[monitor] RESEND_API_KEY not set — paused email skipped');
-    return false;
+    return true;
   }
   const safeUrl = String(watch.targetUrl || '').replace(/[\r\n]/g, '');
   const escape = (s) => String(s == null ? '' : s)
@@ -730,36 +737,40 @@ async function handleRegister(request, env) {
 }
 
 /**
- * /api/checkout — create a Stripe Checkout Session for the Pro tier.
+ * /api/checkout — return the URL to redirect the user to for payment.
  * Returns { checkoutUrl }. The browser redirects there.
  *
- * Two configurations supported:
- *   1. STRIPE_PAYMENT_LINK env var = a static `https://buy.stripe.com/…` URL.
- *      Returns it verbatim. Simplest setup; no Stripe API call.
- *   2. STRIPE_SECRET_KEY + STRIPE_PRICE_ID env vars present → create a Session
- *      via the Stripe API with success/cancel URLs back to qualmly.dev.
+ * Three configurations supported (checked in priority order):
+ *   1. CHECKOUT_URL env var = any static URL (Stripe Payment Link, Gumroad
+ *      subscription product link, etc.). Returns verbatim with optional
+ *      tracking params appended. Simplest setup; works with any provider.
+ *      (Falls back to STRIPE_PAYMENT_LINK for backwards compat.)
+ *   2. STRIPE_SECRET_KEY + STRIPE_PRICE_ID env vars present → create a
+ *      Stripe Checkout Session via the Stripe API.
+ *   3. None set → return 503 with a clear error.
  *
- * Pick whichever you've configured. Payment Link is the launch-day default
- * because it avoids a Stripe SDK dependency in the Worker.
+ * v1.4 launch uses (1) pointing at a Gumroad subscription product —
+ * removes Stripe-account dependency for day-one ship.
  */
 async function handleCheckout(request, env) {
   // The browser may pass { email, userId } in the body. We use these to:
-  //   - Pre-fill the Stripe Checkout email field (better UX)
-  //   - Set client_reference_id so the webhook knows which Qualmly user this
-  //     belongs to. WITHOUT this, post-payment we have no way to flip
-  //     subscriptionActive on the right user record.
+  //   - Pre-fill the checkout email field (better UX)
+  //   - Set client_reference_id so the webhook can resolve back to a user.
   let body = {};
   try { body = await request.json(); } catch(e) { body = {}; }
   const userId = typeof body.userId === 'string' ? body.userId.slice(0, 100) : '';
   const email  = typeof body.email  === 'string' ? body.email.trim().toLowerCase().slice(0, 254) : '';
 
-  if (env.STRIPE_PAYMENT_LINK) {
-    // Append client_reference_id + prefilled_email. Stripe Payment Links
-    // accept these as URL params; on success Stripe writes them into the
-    // checkout.session payload so the webhook can resolve back to a user.
-    let url = env.STRIPE_PAYMENT_LINK;
+  // Generic checkout URL (Stripe Payment Link, Gumroad, or anything else that
+  // accepts URL parameters for prefill/tracking). STRIPE_PAYMENT_LINK is the
+  // backwards-compat alias from v1.4 pre-launch.
+  const checkoutBase = env.CHECKOUT_URL || env.STRIPE_PAYMENT_LINK;
+  if (checkoutBase) {
+    let url = checkoutBase;
     const sep = url.includes('?') ? '&' : '?';
     const extras = [];
+    // client_reference_id is the Stripe naming, but Gumroad ignores unknown
+    // params harmlessly so this works for both.
     if (userId) extras.push('client_reference_id=' + encodeURIComponent(userId));
     if (email)  extras.push('prefilled_email='     + encodeURIComponent(email));
     if (extras.length) url = url + sep + extras.join('&');
@@ -767,7 +778,7 @@ async function handleCheckout(request, env) {
   }
   if (!env.STRIPE_SECRET_KEY || !env.STRIPE_PRICE_ID) {
     return json({
-      error: 'checkout not configured — set STRIPE_PAYMENT_LINK or STRIPE_SECRET_KEY + STRIPE_PRICE_ID'
+      error: 'checkout not configured — set CHECKOUT_URL (Gumroad/Stripe Payment Link) or STRIPE_SECRET_KEY + STRIPE_PRICE_ID'
     }, 503);
   }
 

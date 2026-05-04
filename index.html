@@ -3017,7 +3017,9 @@ function switchMode(mode) {
 // Anthropic key is NEVER stored client-side; it's encrypted in the browser
 // and sent to /api/register one time.
 // ═════════════════════════════════════════════════════════════════════════════
-const MONITOR_API_BASE = "https://monitor.qualmly.dev";
+// Section MM: workers.dev URL is the v1.4 launch target. Once monitor.qualmly.dev
+// custom domain is wired in Cloudflare, swap this back to https://monitor.qualmly.dev.
+const MONITOR_API_BASE = "https://qualmly-monitor.qualmly.workers.dev";
 const MONITOR_USER_KEY = "qualmly_monitor_user";
 
 // Pretend Stripe Checkout session creation lives at the Worker too. For the
