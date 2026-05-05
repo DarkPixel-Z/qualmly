@@ -1,0 +1,164 @@
+<!--
+WIX PASTE INSTRUCTIONS (v1.4 — illustrated):
+1. Open this file in Chrome (double-click). The article will render with images inline.
+2. Click into the article, Ctrl+A, Ctrl+C.
+3. In Wix → Blog → + Create Post → click into post body → Ctrl+V.
+4. Wix preserves the formatting AND embeds the images via their jsDelivr CDN URLs.
+5. Set fields per WIX-PASTE-PACK.md:
+   • Title: We scanned 10 AI-built apps. Here's what every prompt is hiding.
+   • Slug: 10-vibe-coded-apps-audit
+   • Meta description: 9 of 10 AI-coded apps embed database credentials in their JavaScript. We scanned 10 — here's the audit, the methodology, and the six fixes that would close most of it.
+   • Featured image: 2-results-card.png from marketing/launch-assets/ (or upload qualmly-thumbnail-landscape.png)
+   • Tags: AI coding tools, Lovable, Bolt, Supabase, security, vibe coding, Claude API, audit, RLS, CSP
+
+Image source: all images served from jsDelivr CDN, mirroring DarkPixel-Z/qualmly repo on main branch. If you fork or move the repo, update the cdn.jsdelivr.net URLs below.
+-->
+<article>
+  <p><strong>TL;DR:</strong> 9 out of 10 of the AI-coded apps we scanned have their database credentials embedded in the client JavaScript. 0 out of 10 set a Content-Security-Policy. Here's what that means, what we did and didn't do to find out, and what AI coding tools should fix in their defaults.</p>
+
+  <p><img src="https://cdn.jsdelivr.net/gh/DarkPixel-Z/qualmly@main/marketing/launch-assets/2-results-card-twitter.png" alt="A Qualmly scan of matchwise.app showing a score of 47 out of 100, with two passed categories, one warning, and two failed categories including authentication and data layer." style="width:100%;max-width:1200px;border-radius:8px;border:1px solid #2E2E3E;display:block;margin:16px auto" /></p>
+  <p style="font-size:13px;color:#777;text-align:center;font-style:italic;margin-top:-8px">A live Qualmly scan of one of the audited apps. Score 47/100. Two categories failed, one warning. Stripe sk_live_ in the bundle, admin RPCs callable from the client, no CSP header.</p>
+
+  <hr>
+
+  <h2>The headline</h2>
+  <p>We took 10 publicly-listed apps from the showcases of two of the biggest AI coding platforms — 7 from Lovable's curated <em>madewithlovable.com</em> and 3 from <em>bolt.host</em> — and ran a passive static audit on each. No active probing. No backend scanning. We read the publicly-served HTML and JavaScript bundle of each app, the same way an attacker spends their first 60 seconds of recon.</p>
+
+  <p>Here's what we found across the 10:</p>
+  <ul>
+    <li><strong>9/10</strong> expose a Supabase project URL + anon key in their client JavaScript bundle.</li>
+    <li><strong>0/10</strong> set a Content-Security-Policy header.</li>
+    <li><strong>6/10</strong> reference <code>/admin/*</code> routes in the client bundle, up to 10 admin sub-routes in one app.</li>
+    <li><strong>3/10</strong> call admin-flavoured RPC functions (<code>rpc("get_admin_statistics")</code>, <code>rpc("move_candidate_stage")</code>) directly from client JavaScript.</li>
+    <li><strong>1/10</strong> ships <code>127.0.0.1</code> to production — a dev fallback URL that survived the build.</li>
+    <li><strong>1/10</strong> ships realistic-looking fake Stripe keys (<code>sk_live_abc123…</code>) as UI placeholder text in an admin dashboard.</li>
+    <li><strong>7/10</strong> ship <code>console.log</code> statements to production. Median 15 per bundle. Maximum 52.</li>
+    <li><strong>0/10 marketing-tier Lovable apps on custom domains</strong> had HSTS preload set. <strong>2/3 Bolt apps</strong> had it by default — Bolt's hosting beats Lovable's on this specific header.</li>
+  </ul>
+
+  <p>The mean quality score across the batch is <strong>65.7 / 100</strong>. Range: 51 to 82. Not catastrophic. Not safe.</p>
+
+  <hr>
+
+  <h2>Methodology — and what we explicitly did not do</h2>
+  <p>This part matters more than the findings.</p>
+
+  <p><strong>What we did:</strong> we curl-ed the public HTML and the main JavaScript bundle of each app's homepage. We grep-ed the bundles for known credential prefixes (Supabase URLs, Stripe keys, AWS access key IDs, OpenAI keys, GitHub tokens, generic JWTs). We read the HTTP response headers for each domain. We compared bundle sizes, dev-artifact counts (<code>console.log</code>, <code>TODO</code>, <code>XXX</code>, <code>localhost</code>, <code>.env</code> references), and visible auth-provider surface.</p>
+
+  <p><strong>What we did not do:</strong> we did not actively probe any backend. We did not test Row-Level Security policies, even though a Supabase anon key publicly served by the client app is technically usable to do so. We did not submit forms, did not attempt auth bypass, did not call any RPC functions. The line between recon and unauthorized access matters, and we stayed firmly on the recon side.</p>
+
+  <p>This is not a penetration test. This is the report you get from the first 60 seconds of an attacker's day.</p>
+
+  <p>We're publishing aggregate stats only. No app is named in the findings below until its owner has been contacted, given a 14-day window, and either fixed the issue or consented to being named as a positive case study.</p>
+
+  <hr>
+
+  <h2>The dominant pattern</h2>
+  <p>Every Lovable and Bolt app we scanned uses Supabase. That's not a problem on its own — Supabase is a fine choice. But the AI-generated default architecture creates a specific class of risk that none of the 10 apps had visibly mitigated.</p>
+
+  <p>Here's how the pattern works:</p>
+  <ol>
+    <li>The Supabase JavaScript client requires the project URL and the <strong>anon key</strong> in the browser. This is by design. Supabase documents it.</li>
+    <li>The anon key is a JWT signed by Supabase's project secret. Decoding it reveals the project ID and the role (<code>anon</code>). It is not a vulnerability on its own.</li>
+    <li><strong>Row-Level Security (RLS)</strong> policies on every table are what actually protect the data. If a table has RLS off, or a policy has a bug, any visitor can use the anon key + Supabase REST API to query it.</li>
+    <li>AI coding tools generate Supabase schemas from natural-language prompts. They mostly get RLS right. The error rate is non-zero.</li>
+    <li>If the client app calls an RPC function by name (e.g. <code>rpc("get_admin_statistics")</code>), that function bypasses RLS unless it has an explicit role check inside its SQL body. We saw three apps in the batch with this exact pattern.</li>
+  </ol>
+
+  <p><strong>The full failure mode:</strong> an authenticated user runs <code>supabase.rpc("get_admin_statistics")</code> from their DevTools console. If the function doesn't enforce <code>auth.uid()</code> / role checks in its body, it returns admin data to any logged-in user.</p>
+
+  <p>We did not test whether any specific app is vulnerable to this. We're calling out the pattern because it's how most Supabase RLS talks at conferences in 2025 started.</p>
+
+  <hr>
+
+  <h2>Five concrete findings (anonymized)</h2>
+
+  <h3>1. The 10-route admin scaffold</h3>
+  <p>One app in the batch — a UGC-fan-archive platform — ships a client bundle that references <code>/admin</code>, <code>/admin/features</code>, <code>/admin/generate</code>, <code>/admin/imports</code>, <code>/admin/oauth/clients</code>, <code>/admin/reports</code>, <code>/admin/statistics</code>, <code>/admin/unlisted-artists</code>, <code>/admin/users</code>, and at least three more sub-routes. Plus direct client-side calls to RPC functions named <code>get_admin_statistics</code>, <code>get_admin_time_series</code>, <code>get_checked_in_users</code>, and others.</p>
+  <p>If those RPC functions don't have <code>IF NOT EXISTS (SELECT 1 FROM user_roles WHERE user_id = auth.uid() AND role = 'admin')</code> at the top of their bodies, any authenticated user can call them.</p>
+
+  <h3>2. The fake API keys that nuke every secret scanner</h3>
+  <p>An AI-applicant-tracking platform ships <code>sk_live_abc123def456ghi789xyz</code> and <code>sk_test_def456ghi789abc123xyz</code> as UI-display placeholder text in a fake "API Keys" admin dashboard. They are not real secrets, but every CI secret scanner — GitGuardian, TruffleHog, GitHub secret scanning — will flag them on every commit.</p>
+  <p>The deeper issue: the existence of an admin UI that renders full API keys to admins is a UX anti-pattern. Keys should be shown once on creation, then masked forever. Fake placeholder values that match Stripe's regex make this hard to verify.</p>
+
+  <h3>3. The localhost that shipped to production</h3>
+  <p>One B2B retirement-plan marketplace ships <code>127.0.0.1</code> in its production bundle. Almost certainly dead code from a <code>process.env.API_URL || "http://127.0.0.1:3000"</code> pattern. The actual finding isn't the URL itself — it's that the build did not fail on the missing env var.</p>
+
+  <h3>4. The insurance app with crypto sign-in</h3>
+  <p>An insurance-agent quicklink portal — handling regulated data in the United States — has <code>signInWithSolana</code> and <code>signInWithEthereum</code> enabled in its Supabase Auth client. It's deployed on a default <code>*.bolt.host</code> subdomain rather than a custom domain, with no HSTS preload on a custom domain.</p>
+  <p>If this portal touches PHI, the defaults are insufficient for a US regulated-industry app. Crypto wallet auth on an insurance portal is a tell that nobody on the project audited the auth provider list before shipping.</p>
+
+  <h3>5. The zero-CSP rule</h3>
+  <p>All 10 apps. Zero Content-Security-Policy headers.</p>
+  <p>A single compromised ad network, one typo'd script <code>src</code>, one malicious npm dependency in the build pipeline — and any of these apps injects arbitrary JavaScript into every user session.</p>
+  <p>CSP is a one-line HTTP header. Default-off is the wrong default.</p>
+
+  <hr>
+
+  <h2>What AI coding tools should fix in their defaults</h2>
+  <p>Six changes that would close most of what we found:</p>
+  <ol>
+    <li><strong>Emit Content-Security-Policy by default</strong> on every Cloudflare Pages / Netlify / <code>*.bolt.host</code> deploy. Start in <code>Content-Security-Policy-Report-Only</code> mode so it doesn't break anyone's existing app.</li>
+    <li><strong>Disable auth providers that weren't requested in the prompt.</strong> If the user said "make me an insurance portal," don't leave Solana and Ethereum on.</li>
+    <li><strong>Generate an RLS policy + a pgTAP test for every table</strong> the AI creates. Refuse to deploy if the tests fail.</li>
+    <li><strong>Strip console.log and console.debug from production builds by default.</strong> Vite has plugins for this. The templates should include them.</li>
+    <li><strong>Fail the build on unset env vars.</strong> No silent <code>|| "http://localhost"</code> fallbacks.</li>
+    <li><strong>Render admin routes as 404 (not shell)</strong> when the user lacks the role. Small pattern, huge surface reduction.</li>
+  </ol>
+  <p>None of these require changing the user's prompt. They're defaults the platform owns.</p>
+
+  <hr>
+
+  <h2>What you can do today</h2>
+  <p>If you've shipped something with Lovable, Bolt, v0, Cursor, Copilot, Claude Code, Windsurf, or Replit, there are three things worth doing in the next hour.</p>
+
+  <p><strong>1. View source on your live site.</strong> Search for <code>supabase.co</code> and any <code>eyJ...</code> strings. If you find them, that's expected — but it means the entire security model rests on RLS being right. Open your Supabase dashboard, click into each table, and verify RLS is enabled and policies are testable.</p>
+
+  <p><strong>2. Run an automated audit.</strong> We built <a href="https://qualmly.dev?utm_source=darkpixel_blog&utm_medium=audit_post">Qualmly</a> for exactly this. Paste your URL, get a report in 30 seconds with a fix prompt for whichever AI coding tool you use, ready to paste back into the chat. Costs about $0.03 of Anthropic API credits per scan. Open source on <a href="https://github.com/DarkPixel-Z/qualmly">GitHub</a>.</p>
+
+  <p><img src="https://cdn.jsdelivr.net/gh/DarkPixel-Z/qualmly@main/marketing/launch-assets/1-landing-twitter.png" alt="The Qualmly App QA mode landing page with the tagline 'Every qualm, caught before prod' and a URL input field for entering an app URL to audit." style="width:100%;max-width:1200px;border-radius:8px;border:1px solid #2E2E3E;display:block;margin:16px auto" /></p>
+  <p style="font-size:13px;color:#777;text-align:center;font-style:italic;margin-top:-8px">qualmly.dev — drop a URL, get a 30-second audit. BYOK Anthropic API key, your code never touches our servers.</p>
+
+  <p><strong>3. Add a Content-Security-Policy</strong> to your hosting config. Cloudflare Pages, Netlify, and Vercel all let you set headers in a <code>_headers</code> or <code>vercel.json</code> file. If you do nothing else, do this.</p>
+
+  <p>Qualmly also has two sister surfaces for engineering teams that ship continuously:</p>
+  <ul>
+    <li><strong>GitHub Action</strong> that audits every pull request on the way in. Free. <a href="https://github.com/marketplace/actions/qualmly-audit">github.com/marketplace/actions/qualmly-audit</a></li>
+    <li><strong>Python CLI</strong> for APK / IPA scanning — same prompt, same 9 secret patterns, same 8 categories. <code>pipx install qualmly-mobile</code></li>
+  </ul>
+
+  <p>If you want to see what a Qualmly report looks like before grabbing an API key, the <a href="https://qualmly.dev?utm_source=darkpixel_blog&utm_medium=audit_post_demo">live demo</a> loads in one click — no signup, no commitment.</p>
+
+  <hr>
+
+  <h2>New today: continuous monitoring</h2>
+  <p>The one-shot audit catches the foot-shots that are present <em>right now</em>. The harder problem is what happens after launch — your AI coding tool keeps writing new endpoints every week, and the foot-shots accumulate quietly.</p>
+
+  <p>Qualmly's new Pro tier is a <strong>weekly automated rescan</strong> of one app URL. Drop the URL once, get a diff alert in your inbox when findings change. $99/yr per app, BYOK Anthropic so the cron pulls ~$0.03/week off your own credit, not ours.</p>
+
+  <p><img src="https://cdn.jsdelivr.net/gh/DarkPixel-Z/qualmly@main/marketing/launch-assets/4-monitor-pitch-twitter.png" alt="The Qualmly Monitor Pro tier landing page with the tagline 'Catch regressions while you sleep' and a three-step explainer for subscribing, encrypting your Anthropic key in the browser, and picking what to watch and how often." style="width:100%;max-width:1200px;border-radius:8px;border:1px solid #2E2E3E;display:block;margin:16px auto" /></p>
+  <p style="font-size:13px;color:#777;text-align:center;font-style:italic;margin-top:-8px">Continuous monitoring — drop a URL, get a weekly diff in your inbox when findings change.</p>
+
+  <p>The Pro dashboard tracks each watch's last scan, builder, interval, and status. You can add up to 25 watches per account. Cancel any time; data deleted on cancel.</p>
+
+  <p><img src="https://cdn.jsdelivr.net/gh/DarkPixel-Z/qualmly@main/marketing/launch-assets/5-monitor-dashboard-twitter.png" alt="The Qualmly Monitor dashboard showing three active watches with their target URLs, builder type, scan interval, and last-scan timestamp, plus Add and Remove buttons." style="width:100%;max-width:1200px;border-radius:8px;border:1px solid #2E2E3E;display:block;margin:16px auto" /></p>
+  <p style="font-size:13px;color:#777;text-align:center;font-style:italic;margin-top:-8px">The Monitor dashboard. Three active watches in this example: matchwise.app weekly, growthbook-staging biweekly, demo.qualmly.dev daily.</p>
+
+  <p>BYOK is the unfair-margin part of the design. Most security SaaS marks up an LLM API by 5×. Qualmly doesn't touch your Anthropic credit — you pay for the watch slot, not the AI calls. Same scanner runs against your URL every week regardless of how cheap or expensive Anthropic gets.</p>
+
+  <p>Subscribe at <a href="https://darkpixel6.gumroad.com/l/jfidfb">qualmly.dev → Monitor</a>.</p>
+
+  <hr>
+
+  <h2>Disclosure status</h2>
+  <p>The 10 apps in this batch have been notified individually with the specific findings on their app, a 14-day window, and three options: stay anonymous in any future writeup, be named as an example that fixed it, or co-author a short follow-up paragraph about what their team found internally.</p>
+  <p>We'll publish a follow-up post in 30 days with the response rate and named case studies for any team that opted in.</p>
+
+  <hr>
+
+  <h2>About this audit</h2>
+  <p>This audit was run by <a href="https://www.darkpixelconsultinginc.co/">DarkPixel Consulting</a> — a web and app development practice that ships AI-coded apps the right way the first time. We built Qualmly because every project we audited at the consulting layer had at least three of the patterns above. The tool is open-source and BYOK (bring your own Anthropic API key) — your code never touches our servers.</p>
+  <p>If you want a deeper engagement — full audit by a human team, on-prem hosting, custom prompts tuned to your stack — we're <a href="https://www.darkpixelconsultinginc.co/">accepting work</a>.</p>
+  <p>If you want to run this on your own app right now, <a href="https://qualmly.dev">Qualmly is free to use</a>, $15 for a personal commercial license, $49 for an agency white-label tier, $99/year for the Pro continuous-monitoring tier. <a href="https://darkpixel6.gumroad.com/l/qualmly-app/LAUNCH100">First 100 buyers get the launch price.</a></p>
+  <p>Either way: ship it right. The defaults are not your friend.</p>
+</article>
